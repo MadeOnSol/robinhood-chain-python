@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robinhood-chain"
+version = "0.1.0"
+description = "Robinhood Chain API SDK for Python (EVM, chain id 4663)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = [
+    "robinhood chain",
+    "robinhood-chain",
+    "rhc",
+    "evm",
+    "arbitrum-orbit",
+    "chain-4663",
+    "kol",
+    "kol-tracker",
+    "deployer-hunter",
+    "alpha-wallets",
+    "smart-money",
+    "trading",
+    "api",
+    "sdk",
+    "memecoin",
+    "onchain-intelligence",
+    "x402",
+    "ai-agent",
+    "madeonsol",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business :: Financial",
+]
+
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://madeonsol.com/robinhood"
+Repository = "https://github.com/madeonsol/robinhood-chain-python"
+Documentation = "https://madeonsol.com/api-docs"
+Pricing = "https://madeonsol.com/pricing"
+
+[tool.setuptools.packages.find]
+include = ["robinhood_chain*"]
