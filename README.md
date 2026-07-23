@@ -13,7 +13,7 @@ Live KOL trades, token discovery, launch-bundle detection, early-buyer quality, 
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card. Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
-New customers get a **5-day free trial** of Pro or Ultra when you pay by card — full access, nothing charged during the trial, cancel anytime. Start at [madeonsol.com/pricing](https://madeonsol.com/pricing).
+New customers get a **3-day free trial** of Pro or Ultra when you pay by card — full access, nothing charged during the trial, cancel anytime. Start at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
 ## Quick start (10 seconds)
 
