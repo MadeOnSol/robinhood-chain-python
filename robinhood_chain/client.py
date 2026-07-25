@@ -1,6 +1,7 @@
 """Robinhood Chain API client (EVM-native, chain id 4663).
 
-``RobinhoodClient`` is a thin, typed wrapper over the 14 GET endpoints under
+``RobinhoodClient`` is a thin, typed wrapper over the 25 endpoints (23 GET + 2
+batch POST) under
 ``https://madeonsol.com/api/v1/rhc/*``. Auth is a Bearer ``msk_`` API key — the
 same key and base URL as the Solana MadeOnSol API; Robinhood Chain coverage is
 bundled into every tier at no extra cost. This also serves the x402-Py key-mode
@@ -12,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import httpx
 
@@ -200,6 +201,58 @@ class RobinhoodClient:
                 self._raise_for_status(resp)
                 return resp.json()
 
+    def _post(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
+        """Synchronous POST (JSON body) with retry on transient failures."""
+        url = f"{self.base_url}{path}"
+        attempt = 0
+        while True:
+            try:
+                resp = httpx.post(
+                    url, json=json_body, headers=self._headers, timeout=self.timeout
+                )
+            except httpx.HTTPError as exc:
+                if attempt >= self.max_retries:
+                    raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+                time.sleep(_backoff(attempt))
+                attempt += 1
+                continue
+            self._capture_rate_limit(resp)
+            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
+                time.sleep(_backoff(attempt))
+                attempt += 1
+                continue
+            self._raise_for_status(resp)
+            return resp.json()
+
+    async def _apost(
+        self, path: str, json_body: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """Asynchronous POST (JSON body) with retry on transient failures."""
+        url = f"{self.base_url}{path}"
+        attempt = 0
+        async with httpx.AsyncClient(timeout=self.timeout) as http:
+            while True:
+                try:
+                    resp = await http.post(url, json=json_body, headers=self._headers)
+                except httpx.HTTPError as exc:
+                    if attempt >= self.max_retries:
+                        raise RobinhoodError(
+                            f"Request to {path} failed: {exc}"
+                        ) from exc
+                    await asyncio.sleep(_backoff(attempt))
+                    attempt += 1
+                    continue
+                self._capture_rate_limit(resp)
+                if (
+                    resp.status_code in _RETRY_STATUSES
+                    and attempt < self.max_retries
+                ):
+                    await asyncio.sleep(_backoff(attempt))
+                    attempt += 1
+                    continue
+                self._raise_for_status(resp)
+                return resp.json()
+
     # ── KOL: feed / leaderboard / hot-tokens / profile ─────────────────────
 
     def kol_feed(
@@ -271,6 +324,102 @@ class RobinhoodClient:
         Route: ``GET /api/v1/rhc/kol/hot-tokens``. Tier: BASIC.
         """
         return self._get("/rhc/kol/hot-tokens", {"window": window})
+
+    def kol_coordination(
+        self,
+        *,
+        period: str = "24h",
+        min_kols: int = 2,
+        limit: int = 20,
+        min_mc_usd: Optional[float] = None,
+        max_mc_usd: Optional[float] = None,
+    ) -> t.CoordinationResponse:
+        """KOL clustering / consensus on Robinhood Chain (BASIC+).
+
+        Tokens bought by N+ DISTINCT tracked KOLs inside the window, ranked by
+        KOL count then buy volume. Each row carries the per-KOL breakdown,
+        ``net_eth`` (buys − sells in-window), a ``signal`` of ``'accumulating'``
+        vs ``'distributing'``, ``exited_count`` / ``holders_count``, and
+        ``time_to_consensus_sec`` (how fast the cohort piled in).
+
+        Deeper than ``kol_hot_tokens``: that returns the ranked token list, this
+        returns the cohort composition and exit state behind it. RHC has no KOL
+        winrate/strategy MVs, so the Solana ``avg_winrate_7d`` /
+        ``coordination_score`` fields are intentionally absent.
+
+        Args:
+            period: ``'1h'`` | ``'6h'`` | ``'24h'`` (default) | ``'7d'``.
+            min_kols: Minimum distinct KOL buyers to qualify (2–50, default 2).
+            limit: Max tokens (1–50, default 20).
+            min_mc_usd: Minimum market cap at the FIRST KOL buy (USD). Tokens
+                with an unknown entry MC are excluded when a band is set.
+            max_mc_usd: Maximum market cap at the first KOL buy (USD).
+
+        Route: ``GET /api/v1/rhc/kol/coordination``. Tier: BASIC.
+        """
+        return self._get(
+            "/rhc/kol/coordination",
+            {
+                "period": period,
+                "min_kols": min_kols,
+                "limit": limit,
+                "min_mc_usd": min_mc_usd,
+                "max_mc_usd": max_mc_usd,
+            },
+        )
+
+    def kol_first_touches(
+        self,
+        *,
+        limit: int = 50,
+        since: Optional[str] = None,
+        before: Optional[str] = None,
+        min_eth: Optional[float] = None,
+        token_age_max_min: Optional[int] = None,
+        launchpad: Optional[str] = None,
+        min_mc_usd: Optional[float] = None,
+        max_mc_usd: Optional[float] = None,
+    ) -> t.FirstTouchesResponse:
+        """Earliest KOL entry per token on Robinhood Chain (BASIC+).
+
+        The first time ANY tracked KOL bought a given token — the early-entry /
+        discovery signal. Each event carries the entry size in ETH, ``tx_hash``,
+        ``token_age_minutes`` at first touch, the MC at entry and the current +
+        peak MC (so you can score how the call aged).
+
+        Tier depth: BASIC clamps ``limit`` to 20; the KOL's ``evm_address``
+        inside ``first_kol`` is revealed only to ULTRA/BUSINESS (``name`` and
+        ``twitter_url`` are always returned).
+
+        Args:
+            limit: Max events (1–100, default 50; clamped to 20 below PRO).
+            since: ISO 8601 — only first-touches strictly newer. The polling
+                idiom: pass back ``next_before``/the newest timestamp you saw.
+            before: ISO 8601 cursor — only first-touches strictly older. Pass
+                ``next_before`` from the previous response to page back.
+            min_eth: Minimum first-buy size in ETH (0–100000).
+            token_age_max_min: Only tokens younger than N minutes at first touch
+                (1–43200) — isolates genuinely early calls.
+            launchpad: Filter by launchpad (pons, flap, clanker, hood.fun,
+                noxa, virtuals).
+            min_mc_usd: Minimum market cap at first buy (USD).
+            max_mc_usd: Maximum market cap at first buy (USD).
+
+        Route: ``GET /api/v1/rhc/kol/first-touches``. Tier: BASIC.
+        """
+        return self._get(
+            "/rhc/kol/first-touches",
+            {
+                "limit": limit,
+                "since": since,
+                "before": before,
+                "min_eth": min_eth,
+                "token_age_max_min": token_age_max_min,
+                "launchpad": launchpad,
+                "min_mc_usd": min_mc_usd,
+                "max_mc_usd": max_mc_usd,
+            },
+        )
 
     def kol_wallet(self, wallet: str) -> t.KolProfileResponse:
         """Single KOL profile on Robinhood Chain (BASIC+).
@@ -456,7 +605,57 @@ class RobinhoodClient:
         """
         return self._get(f"/rhc/tokens/{address}/bundle")
 
-    # ── Deployer hunter: leaderboard / profile ─────────────────────────────
+    def token_batch(self, addresses: Sequence[str]) -> t.TokenBatchResponse:
+        """Up to 50 Robinhood Chain tokens in ONE call (BASIC+).
+
+        Set-based — three queries server-side regardless of batch size, not a
+        fan-out of the single-token route. Each entry returns metadata, live
+        price/MC/FDV/liquidity, peak MC, primary DEX and the deployer reputation
+        block. Every REQUESTED address is echoed back, unknown ones as
+        ``{'address': ..., 'found': False}``, so positions line up with what you
+        sent.
+
+        Narrower than :meth:`token` on purpose: it does NOT bundle buyer-quality
+        (a per-token cohort computation) — use
+        :meth:`tokens_batch_buyer_quality` for that.
+
+        Args:
+            addresses: 1–50 token addresses (``0x`` + 40 hex). Duplicates are
+                de-duplicated server-side.
+
+        Route: ``POST /api/v1/rhc/token/batch``. Tier: BASIC. 400 if the list is
+        empty, over 50, or contains a non-EVM address.
+        """
+        return self._post("/rhc/token/batch", {"addresses": list(addresses)})
+
+    def tokens_batch_buyer_quality(
+        self, addresses: Sequence[str]
+    ) -> t.BatchBuyerQualityResponse:
+        """Early-buyer quality for up to 20 Robinhood Chain tokens (BASIC+).
+
+        Batched :meth:`token_buyer_quality`: the 0–100 read on each token's
+        earliest distinct buyer cohort. Per-token failures degrade to an entry
+        carrying ``error`` rather than failing the whole batch, so one unpriced
+        token never costs you the other 19 results.
+
+        ⚠️ The cap is **20**, deliberately lower than the Solana batch cap of 50:
+        RHC buyer-quality is a per-token cohort computation (ordered early-buyer
+        scan + bundle detection + alpha/cluster joins), not one set-based query,
+        so 50 would mean ~200 round-trips behind a single request. The cap is
+        echoed back as ``max_addresses``.
+
+        Args:
+            addresses: 1–20 token addresses (``0x`` + 40 hex).
+
+        Route: ``POST /api/v1/rhc/tokens/batch/buyer-quality``. Tier: BASIC.
+        400 (with ``max_addresses``) if the list is empty, over 20, or contains
+        a non-EVM address.
+        """
+        return self._post(
+            "/rhc/tokens/batch/buyer-quality", {"addresses": list(addresses)}
+        )
+
+    # ── Deployer hunter: leaderboard / profile / alerts / history / stats ──
 
     def deployer_hunter_leaderboard(
         self,
@@ -473,6 +672,14 @@ class RobinhoodClient:
         Most RHC launchpads are direct-to-DEX, so ``graduation_rate`` = share of
         the deployer's tokens that reached a $40K+ peak MC; ``runner_rate`` =
         share that reached $100K+.
+
+        ⚠️ TIER SEMANTICS (migrations 267 + 269): ``elite`` / ``good`` are earned
+        on the $100K ``runner_rate`` and require 24h of deployer history — the
+        $40K bar proved farmable by operators mass-relaunching one ticker across
+        rotating wallets. ``graduation_rate`` is still returned and still means
+        the $40K bar, but it NO LONGER determines the tier (``spammer`` is the
+        one exception — detecting trash is a different question from detecting
+        quality). Call :meth:`deployer_hunter_stats` for the live thresholds.
 
         Args:
             sort: ``'graduation_rate'`` (default) | ``'runner_rate'`` |
@@ -511,6 +718,251 @@ class RobinhoodClient:
         Route: ``GET /api/v1/rhc/deployer-hunter/{address}``. Tier: BASIC.
         """
         return self._get(f"/rhc/deployer-hunter/{address}")
+
+    def deployer_hunter_alerts(
+        self,
+        *,
+        deployer_tier: Optional[str] = None,
+        priority: Optional[str] = None,
+        alert_type: Optional[str] = None,
+        launchpad: Optional[str] = None,
+        min_mc: Optional[float] = None,
+        include_untradeable: Optional[bool] = None,
+        since: Optional[str] = None,
+        before: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> t.DeployerAlertsResponse:
+        """Deployer signal feed on Robinhood Chain (BASIC+).
+
+        Live alerts when a tracked deployer ships a new token or one of their
+        tokens graduates ($40K+ peak MC). RHC domain values are narrower than
+        Solana's: ``alert_type`` is ``new_deploy`` | ``graduated`` (no
+        bonded/kol_buy), ``priority`` is ``high`` | ``medium`` (no low), and
+        alerts carry no KOL join.
+
+        ⚠️ TRADABILITY FILTER IS ON BY DEFAULT (2026-07-25): alerts whose token
+        has ``liquidity_usd`` below $100 — or unknown liquidity, which on RHC
+        usually means a drained pool — are dropped, because a $45K-MC alert on a
+        token with $68 of liquidity is not a signal. Pass
+        ``include_untradeable=True`` for the raw tape (archive/leaderboard
+        tooling). The active setting is echoed as ``tradability_filter``.
+
+        ⚠️ TIER IS RESOLVED AT READ TIME (2026-07-25): ``tier`` is the deployer's
+        CURRENT tier from the reputation view, not the snapshot taken when the
+        alert fired — the snapshot is returned alongside as ``tier_at_alert``,
+        with ``tier_is_stale`` set when the two disagree. ``deployer_tier``
+        filters on the RESOLVED value so the filter and the payload always
+        agree. Tiers now ride the $100K ``runner_rate`` (migrations 267 + 269),
+        so ``message`` is restated in those terms; ``graduation_rate`` still
+        means the $40K bar but no longer sets the tier.
+
+        Args:
+            deployer_tier: ``'elite'`` | ``'good'`` | ``'neutral'`` |
+                ``'spammer'`` — matched against the read-time tier.
+            priority: ``'high'`` | ``'medium'``.
+            alert_type: ``'new_deploy'`` | ``'graduated'``.
+            launchpad: Filter by launchpad (1–32 chars).
+            min_mc: Minimum market cap at alert time (USD).
+            include_untradeable: ``True`` disables the $100 liquidity floor.
+            since: ISO 8601 — only alerts with ``event_at`` strictly newer. The
+                incremental-polling idiom: pass back ``next_event_at``.
+            before: ISO 8601 cursor — only alerts strictly older. Pass
+                ``next_before`` to page back. Takes precedence over ``offset``.
+            limit: Max alerts (1–500, default 50). BASIC/PRO are capped at 50;
+                only ULTRA gets the full requested limit.
+            offset: Page offset (0–10000, default 0). Ignored when ``before``
+                is set.
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/alerts``. Tier: BASIC.
+        """
+        return self._get(
+            "/rhc/deployer-hunter/alerts",
+            {
+                "deployer_tier": deployer_tier,
+                "priority": priority,
+                "alert_type": alert_type,
+                "launchpad": launchpad,
+                "min_mc": min_mc,
+                "include_untradeable": include_untradeable,
+                "since": since,
+                "before": before,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+
+    def deployer_hunter_best_tokens(
+        self, *, period: str = "7d", limit: int = 10
+    ) -> t.BestTokensResponse:
+        """Best tokens from reputable Robinhood Chain deployers (BASIC+).
+
+        The highest-peaking tokens launched in the window by deployers that are
+        currently ``elite`` or ``good`` — "what did the deployers worth tracking
+        actually produce". Gated on reputation, not raw peak MC; the unfiltered
+        version is ``tokens(sort='peak_mc')``.
+
+        Reputation here means the $100K ``runner_rate`` tier (migrations 267 +
+        269), not the $40K ``graduation_rate`` — the latter is still returned on
+        each token's ``deployer`` block but no longer sets the tier.
+
+        ``candidates_scanned`` reports how many launches were considered before
+        ranking; if ``truncated`` is ``True`` the top-N was drawn from the 1000
+        most RECENT launches in the period rather than the whole period.
+
+        Args:
+            period: ``'24h'`` | ``'7d'`` (default) | ``'30d'`` | ``'all'``.
+            limit: Max tokens (1–50, default 10).
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/best-tokens``. Tier: BASIC.
+        """
+        return self._get(
+            "/rhc/deployer-hunter/best-tokens", {"period": period, "limit": limit}
+        )
+
+    def deployer_hunter_recent_bonds(
+        self,
+        *,
+        deployer_tier: Optional[str] = None,
+        min_peak: Optional[float] = None,
+        limit: int = 50,
+    ) -> t.RecentBondsResponse:
+        """Recent graduations on Robinhood Chain (BASIC+).
+
+        Tokens that crossed the $40K peak-MC graduation milestone, newest peak
+        first, with token metadata and the deployer's tier. On RHC a
+        "graduation" is that MC milestone, NOT a bonding-curve completion —
+        noxa/pons/clanker launch direct-to-DEX with no curve — so the set is
+        defined purely by ``peak_mc_usd >= 40000``.
+
+        Args:
+            deployer_tier: Filter to ``'elite'`` | ``'good'`` | ``'neutral'`` |
+                ``'spammer'``. Tiers ride the $100K runner rate (migrations 267
+                + 269), not the $40K graduation bar this feed is keyed on.
+            min_peak: Raise the peak-MC floor (USD). Never lowers it below the
+                $40K graduation milestone.
+            limit: Max tokens (1–200, default 50).
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/recent-bonds``. Tier: BASIC.
+        """
+        return self._get(
+            "/rhc/deployer-hunter/recent-bonds",
+            {
+                "deployer_tier": deployer_tier,
+                "min_peak": min_peak,
+                "limit": limit,
+            },
+        )
+
+    def deployer_hunter_stats(self) -> t.DeployerStatsResponse:
+        """Chain-wide deployer reputation summary for Robinhood Chain (BASIC+).
+
+        Population per tier (deployers + tokens), the reputable-deployer count,
+        ``spam_token_share``, and 24h/7d alert volume — the denominator for any
+        "is this deployer rare?" question.
+
+        Also returns ``tier_rules``, the ACTIVE tier thresholds, so you can see
+        what ``elite`` currently means instead of guessing from the label:
+        ``elite`` / ``good`` are earned on the $100K ``runner_rate`` and require
+        24h of deployer history (migrations 267 + 269), while ``spammer`` still
+        keys off ``graduation_rate``. ``graduation_definition`` ($40K) and
+        ``runner_definition`` ($100K) spell out both bars.
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/stats``. Tier: BASIC.
+        """
+        return self._get("/rhc/deployer-hunter/stats")
+
+    def deployer_hunter_trajectory(self, address: str) -> t.DeployerTrajectoryResponse:
+        """Is this Robinhood Chain deployer getting better or worse? (BASIC+)
+
+        A shape-over-time read on one deployer's launch history: current and
+        longest hit/miss streaks, a rolling 10-launch success rate, the best and
+        worst 10-launch stretches, average days between deploys, and average
+        launches burned between a miss and the next hit — plus a ``trend`` of
+        ``'improving'`` | ``'declining'`` | ``'stable'``.
+
+        The per-token success event is the $40K peak-MC GRADUATION milestone
+        (echoed as ``success_metric``), NOT the $100K runner bar that migrations
+        267 + 269 moved TIERS onto — $100K is rare enough that most deployers
+        would return an all-zero curve, and a trajectory needs enough events to
+        have a shape. Field names keep the Solana ``bond`` wording so the two
+        chains' responses stay drop-in compatible.
+
+        Analysis is capped at the 500 oldest→newest launches; ``truncated``
+        tells you whether the curve is the whole story. Unknown wallets return
+        200 with ``is_deployer: False`` (not a 404).
+
+        Args:
+            address: Deployer EVM wallet address (``0x`` + 40 hex).
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/{address}/trajectory``.
+        Tier: BASIC.
+        """
+        return self._get(f"/rhc/deployer-hunter/{address}/trajectory")
+
+    def deployer_hunter_tokens(
+        self,
+        address: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        sort: str = "first_seen_at",
+    ) -> t.DeployerTokensResponse:
+        """One deployer's full paginated launch history (BASIC+).
+
+        Every token this deployer shipped, enriched with live MC, peak MC and
+        liquidity. Distinct from :meth:`deployer_hunter_profile`, which caps
+        ``recent_tokens`` at 50 and is a point-in-time profile read — this is the
+        enumerable history with ``limit``/``offset`` and ``has_more``.
+
+        Args:
+            address: Deployer EVM wallet address (``0x`` + 40 hex).
+            limit: Page size (1–100, default 50).
+            offset: Page offset (0–10000, default 0).
+            sort: ``'first_seen_at'`` (default, newest first — ordered in
+                Postgres) | ``'peak_mc_usd'``. ⚠️ ``peak_mc_usd`` is a
+                PAGE-SCOPED sort — peak MC lives in another table and is applied
+                after enrichment of the requested page only, so it is NOT a
+                global "top tokens by peak MC" ranking. The response echoes
+                ``sort_scope: 'page'`` when it is in effect; use
+                :meth:`deployer_hunter_best_tokens` for a real ranking.
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/{address}/tokens``. Tier: BASIC.
+        Unknown wallets return 200 with ``is_deployer: False``.
+        """
+        return self._get(
+            f"/rhc/deployer-hunter/{address}/tokens",
+            {"limit": limit, "offset": offset, "sort": sort},
+        )
+
+    def deployer_hunter_history(
+        self, address: str, *, limit: int = 100, offset: int = 0
+    ) -> t.DeployerHistoryResponse:
+        """One deployer's deploy history with graduation detail (PRO+).
+
+        The reputation row plus every token deployed — newest first, with a
+        stable tiebreaker so paginated pages never overlap or skip — enriched
+        with live and peak MC and the ``graduated_pool``. ``total`` is an exact
+        count.
+
+        RHC has no per-day reputation snapshot table (that is Solana-only), so
+        unlike the Solana ``/history`` this is a token-deploy history, not a
+        daily tier/rate time-series. For the shape-over-time read use
+        :meth:`deployer_hunter_trajectory`.
+
+        Args:
+            address: Deployer EVM wallet address (``0x`` + 40 hex).
+            limit: Page size (1–1000, default 100).
+            offset: Page offset (0–100000, default 0).
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/{address}/history``. Tier: PRO+
+        (the point-in-time :meth:`deployer_hunter_profile` stays BASIC). Unknown
+        wallets return 200 with ``is_deployer: False``.
+        """
+        return self._get(
+            f"/rhc/deployer-hunter/{address}/history",
+            {"limit": limit, "offset": offset},
+        )
 
     # ── Alpha wallets ──────────────────────────────────────────────────────
 
@@ -601,10 +1053,10 @@ class RobinhoodClient:
 class AsyncRobinhoodClient:
     """Async wrapper around :class:`RobinhoodClient`.
 
-    Each of the 14 endpoint methods is exposed as a coroutine with the same
-    signature as its sync twin. The endpoint methods build their (path, params)
-    on the shared sync instance and dispatch through the async transport, so the
-    two paths can never drift.
+    Each of the 25 endpoint methods is exposed as a coroutine with the same
+    signature as its sync twin. The endpoint methods build their (path, params
+    or JSON body) on the shared sync instance and dispatch through the async
+    transport, so the two paths can never drift.
     """
 
     def __init__(self, sync: RobinhoodClient) -> None:
@@ -616,20 +1068,24 @@ class AsyncRobinhoodClient:
         sync_method = getattr(self._sync, name)
 
         async def _call(*args: Any, **kwargs: Any) -> Any:
-            path, params = _capture_request(self._sync, sync_method, args, kwargs)
-            return await self._sync._aget(path, params)
+            rec = _capture_request(self._sync, sync_method, args, kwargs)
+            if rec.get("method") == "POST":
+                return await self._sync._apost(rec.get("path"), rec.get("json"))
+            return await self._sync._aget(rec.get("path"), rec.get("params"))
 
         _call.__name__ = name
         _call.__doc__ = sync_method.__doc__
         return _call
 
 
-# The 14 dispatch-only endpoint methods (each ends in a single ``self._get``).
-_ENDPOINTS = frozenset(
+# The GET endpoint methods (each ends in a single ``self._get``).
+_GET_ENDPOINTS = frozenset(
     {
         "kol_feed",
         "kol_leaderboard",
         "kol_hot_tokens",
+        "kol_coordination",
+        "kol_first_touches",
         "kol_wallet",
         "trades",
         "tokens",
@@ -640,38 +1096,73 @@ _ENDPOINTS = frozenset(
         "token_bundle",
         "deployer_hunter_leaderboard",
         "deployer_hunter_profile",
+        "deployer_hunter_alerts",
+        "deployer_hunter_best_tokens",
+        "deployer_hunter_recent_bonds",
+        "deployer_hunter_stats",
+        "deployer_hunter_trajectory",
+        "deployer_hunter_tokens",
+        "deployer_hunter_history",
         "alpha_wallets",
     }
 )
 
+# The POST endpoint methods (each ends in a single ``self._post``).
+_POST_ENDPOINTS = frozenset(
+    {
+        "token_batch",
+        "tokens_batch_buyer_quality",
+    }
+)
 
-def _capture_request(client: RobinhoodClient, sync_method: Any, args: tuple, kwargs: dict):
-    """Run a sync endpoint method with its ``_get`` stubbed out to record the
-    (path, params) it would have requested — used to drive the async transport
+# Every dispatch-only endpoint method, GET and POST alike.
+_ENDPOINTS = _GET_ENDPOINTS | _POST_ENDPOINTS
+
+# Backwards-compatible alias — this used to be the GET-only set.
+_ENDPOINTS_GET = _GET_ENDPOINTS
+
+
+def _capture_request(
+    client: RobinhoodClient, sync_method: Any, args: tuple, kwargs: dict
+) -> Dict[str, Any]:
+    """Run a sync endpoint method with its ``_get``/``_post`` stubbed out to
+    record the request it would have made — used to drive the async transport
     from the exact same argument-parsing code. Scoped to a fresh throwaway
-    client copy so the live client's transport is never mutated."""
+    client copy so the live client's transport is never mutated.
+
+    Returns ``{'method', 'path', 'params'}`` for a GET or
+    ``{'method', 'path', 'json'}`` for a POST."""
     recorder: Dict[str, Any] = {}
 
-    def _stub(path: str, params: Optional[Dict[str, Any]] = None) -> None:
+    def _get_stub(path: str, params: Optional[Dict[str, Any]] = None) -> None:
+        recorder["method"] = "GET"
         recorder["path"] = path
         recorder["params"] = params
         return None
 
-    # Bind the sync method to a shallow proxy whose only override is ``_get``,
-    # leaving the real client untouched (thread-safe, no attribute mutation).
-    proxy = _RecordingProxy(client, _stub)
+    def _post_stub(path: str, json_body: Optional[Dict[str, Any]] = None) -> None:
+        recorder["method"] = "POST"
+        recorder["path"] = path
+        recorder["json"] = json_body
+        return None
+
+    # Bind the sync method to a shallow proxy whose only overrides are ``_get``
+    # and ``_post``, leaving the real client untouched (thread-safe, no
+    # attribute mutation).
+    proxy = _RecordingProxy(client, _get_stub, _post_stub)
     sync_method.__func__(proxy, *args, **kwargs)
-    return recorder.get("path"), recorder.get("params")
+    return recorder
 
 
 class _RecordingProxy:
-    """Delegates every attribute to the wrapped client except ``_get``, which is
-    replaced by a recorder. Lets us reuse a sync method's body without touching
-    the shared client instance."""
+    """Delegates every attribute to the wrapped client except ``_get`` and
+    ``_post``, which are replaced by recorders. Lets us reuse a sync method's
+    body without touching the shared client instance."""
 
-    def __init__(self, client: RobinhoodClient, get_stub: Any) -> None:
+    def __init__(self, client: RobinhoodClient, get_stub: Any, post_stub: Any) -> None:
         object.__setattr__(self, "_client", client)
         object.__setattr__(self, "_get", get_stub)
+        object.__setattr__(self, "_post", post_stub)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(object.__getattribute__(self, "_client"), name)

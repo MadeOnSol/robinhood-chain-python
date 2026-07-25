@@ -438,6 +438,351 @@ class DeployerProfileResponse(TypedDict, total=False):
     recent_tokens_count: int
 
 
+# ── /rhc/deployer-hunter/{address}/trajectory ──
+
+
+class TrajectoryStreak(TypedDict, total=False):
+    type: str  # "bond" | "fail" | "none"
+    count: int
+
+
+class TrajectoryWindow(TypedDict, total=False):
+    window_end: int
+    bond_rate: float
+
+
+class TrajectoryStretch(TypedDict, total=False):
+    start_index: int
+    end_index: int
+    bond_rate: float
+
+
+class DeployerTrajectory(TypedDict, total=False):
+    current_streak: TrajectoryStreak
+    longest_bond_streak: int
+    longest_fail_streak: int
+    rolling_bond_rates: List[TrajectoryWindow]
+    trend: str  # "improving" | "declining" | "stable"
+    avg_days_between_deploys: Optional[float]
+    avg_recovery_tokens: Optional[float]
+    best_stretch: Optional[TrajectoryStretch]
+    worst_stretch: Optional[TrajectoryStretch]
+    total_tokens_analyzed: int
+
+
+class DeployerTrajectoryResponse(TypedDict, total=False):
+    chain: str
+    is_deployer: bool
+    address: str
+    deployer: Optional[DeployerRow]
+    success_metric: str
+    trajectory: Optional[DeployerTrajectory]
+    truncated: bool
+
+
+# ── /rhc/deployer-hunter/{address}/tokens ──
+
+
+class DeployerTokenRow(TypedDict, total=False):
+    address: str
+    symbol: Optional[str]
+    name: Optional[str]
+    launchpad: Optional[str]
+    deployer_source: Optional[str]
+    is_graduated: Optional[bool]
+    graduated_at: Optional[str]
+    first_seen_at: Optional[str]
+    market_cap_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    peak_mc_at: Optional[str]
+    liquidity_usd: Optional[float]
+
+
+class DeployerTokensResponse(TypedDict, total=False):
+    chain: str
+    is_deployer: bool
+    address: str
+    deployer: Optional[DeployerRow]
+    tokens: List[DeployerTokenRow]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+    sort: str
+    sort_scope: str  # only present when sort='peak_mc_usd' (page-scoped ordering)
+
+
+# ── /rhc/deployer-hunter/best-tokens ──
+
+
+class BestTokenDeployer(TypedDict, total=False):
+    address: str
+    tier: str
+    graduation_rate: Optional[float]
+    runner_rate: Optional[float]
+    tokens_deployed: int
+
+
+class BestToken(TypedDict, total=False):
+    address: str
+    symbol: Optional[str]
+    name: Optional[str]
+    launchpad: Optional[str]
+    first_seen_at: Optional[str]
+    is_graduated: Optional[bool]
+    market_cap_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    peak_mc_at: Optional[str]
+    liquidity_usd: Optional[float]
+    deployer: Optional[BestTokenDeployer]
+
+
+class BestTokensResponse(TypedDict, total=False):
+    chain: str
+    tokens: List[BestToken]
+    period: str
+    limit: int
+    reputable_deployers: int
+    candidates_scanned: int
+    truncated: bool
+
+
+# ── /rhc/deployer-hunter/stats ──
+
+
+class DeployerTierCount(TypedDict, total=False):
+    deployers: int
+    tokens: int
+
+
+class DeployerStatsResponse(TypedDict, total=False):
+    chain: str
+    total_deployers: int
+    total_tokens: int
+    reputable_deployers: int
+    by_tier: dict  # tier -> DeployerTierCount
+    spam_token_share: Optional[float]
+    alerts_24h: int
+    alerts_7d: int
+    tier_rules: dict
+    graduation_definition: str
+    runner_definition: str
+
+
+# ── /rhc/deployer-hunter/alerts ──
+
+
+class DeployerAlert(TypedDict, total=False):
+    id: str
+    deployer_address: str
+    token_address: Optional[str]
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    alert_type: str  # "new_deploy" | "graduated"
+    title: Optional[str]
+    message: Optional[str]
+    launchpad: Optional[str]
+    tier: Optional[str]  # CURRENT tier, resolved at read time
+    tier_at_alert: Optional[str]  # snapshot written when the alert fired
+    tier_is_stale: bool
+    mc_at_alert: Optional[float]
+    current_mc_usd: Optional[float]
+    liquidity_usd: Optional[float]
+    priority: str  # "high" | "medium"
+    is_active: bool
+    created_at: str
+    event_at: Optional[str]
+
+
+class DeployerAlertsResponse(TypedDict, total=False):
+    chain: str
+    alerts: List[DeployerAlert]
+    limit: int
+    offset: int
+    tradability_filter: str
+    next_event_at: Optional[str]
+    next_before: Optional[str]
+    data_age_seconds: Optional[int]
+
+
+# ── /rhc/deployer-hunter/{address}/history ──
+
+
+class DeployerHistoryToken(TypedDict, total=False):
+    address: str
+    symbol: Optional[str]
+    name: Optional[str]
+    launchpad: Optional[str]
+    is_graduated: Optional[bool]
+    graduated_at: Optional[str]
+    graduated_pool: Optional[str]
+    first_seen_at: Optional[str]
+    market_cap_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    peak_mc_at: Optional[str]
+
+
+class DeployerHistoryResponse(TypedDict, total=False):
+    chain: str
+    is_deployer: bool
+    address: str
+    deployer: Optional[DeployerRow]
+    tokens: List[DeployerHistoryToken]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
+# ── /rhc/deployer-hunter/recent-bonds ──
+
+
+class RecentBondToken(TypedDict, total=False):
+    address: str
+    symbol: Optional[str]
+    name: Optional[str]
+    launchpad: Optional[str]
+    is_graduated: Optional[bool]
+    deployer_address: Optional[str]
+    deployer_tier: Optional[str]
+    first_seen_at: Optional[str]
+    market_cap_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    peak_mc_at: Optional[str]
+
+
+class RecentBondsResponse(TypedDict, total=False):
+    chain: str
+    graduation_mc: int
+    tokens: List[RecentBondToken]
+    limit: int
+    next_peak_mc_at: Optional[str]
+
+
+# ── POST /rhc/token/batch ──
+
+
+class TokenBatchEntry(TypedDict, total=False):
+    address: str
+    found: bool
+    symbol: Optional[str]
+    name: Optional[str]
+    decimals: Optional[int]
+    launchpad: Optional[str]
+    is_graduated: Optional[bool]
+    graduated_at: Optional[str]
+    first_seen_at: Optional[str]
+    price_usd: Optional[float]
+    market_cap_usd: Optional[float]
+    fdv_usd: Optional[float]
+    liquidity_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    peak_mc_at: Optional[str]
+    primary_dex: Optional[str]
+    last_trade_time: Optional[str]
+    deployer: Optional[dict]
+
+
+class TokenBatchResponse(TypedDict, total=False):
+    chain: str
+    tokens: List[TokenBatchEntry]
+    requested: int
+    found: int
+
+
+# ── POST /rhc/tokens/batch/buyer-quality ──
+
+
+class BatchBuyerQualityResponse(TypedDict, total=False):
+    chain: str
+    tokens: List[dict]  # BuyerQualityResponse-shaped, or {token_address, error}
+    requested: int
+    scored: int
+    max_addresses: int
+    coverage: dict
+
+
+# ── /rhc/kol/coordination ──
+
+
+class CoordinationKol(TypedDict, total=False):
+    evm_address: str
+    name: Optional[str]
+    twitter_url: Optional[str]
+    buy_eth: float
+    sell_eth: float
+    exited: bool
+
+
+class CoordinationToken(TypedDict, total=False):
+    token_address: str
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    launchpad: Optional[str]
+    is_graduated: Optional[bool]
+    deployer_tier: Optional[str]
+    token_age_minutes: Optional[int]
+    kol_count: int
+    total_buys: int
+    buy_eth: float
+    sell_eth: float
+    net_eth: float
+    signal: str  # "accumulating" | "distributing"
+    exited_count: int
+    holders_count: int
+    first_buy_at: str
+    last_buy_at: str
+    time_to_consensus_sec: int
+    market_cap_usd_at_first_buy: Optional[float]
+    current_mc_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    liquidity_usd: Optional[float]
+    kols: List[CoordinationKol]
+
+
+class CoordinationResponse(TypedDict, total=False):
+    chain: str
+    coordination: List[CoordinationToken]
+    count: int
+    period: str
+    min_kols: int
+
+
+# ── /rhc/kol/first-touches ──
+
+
+class FirstTouchKol(TypedDict, total=False):
+    evm_address: str  # ULTRA/BUSINESS only
+    name: Optional[str]
+    twitter_url: Optional[str]
+
+
+class FirstTouchEvent(TypedDict, total=False):
+    token_address: str
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    launchpad: Optional[str]
+    is_graduated: Optional[bool]
+    first_buy_at: str
+    eth_amount: Optional[float]
+    token_amount: Optional[float]
+    tx_hash: str
+    token_age_minutes: Optional[int]
+    market_cap_usd_at_first_buy: Optional[float]
+    price_usd_at_first_buy: Optional[float]
+    current_mc_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    first_kol: FirstTouchKol
+
+
+class FirstTouchesResponse(TypedDict, total=False):
+    chain: str
+    events: List[FirstTouchEvent]
+    count: int
+    next_before: Optional[str]
+    data_age_seconds: Optional[int]
+
+
 # ── /rhc/alpha-wallets ──
 
 
