@@ -1,6 +1,6 @@
 """Robinhood Chain API client (EVM-native, chain id 4663).
 
-``RobinhoodClient`` is a thin, typed wrapper over the 25 endpoints (23 GET + 2
+``RobinhoodClient`` is a thin, typed wrapper over the 30 endpoints (28 GET + 2
 batch POST) under
 ``https://madeonsol.com/api/v1/rhc/*``. Auth is a Bearer ``msk_`` API key — the
 same key and base URL as the Solana MadeOnSol API; Robinhood Chain coverage is
@@ -604,6 +604,139 @@ class RobinhoodClient:
         Route: ``GET /api/v1/rhc/tokens/{address}/bundle``. Tier: BASIC.
         """
         return self._get(f"/rhc/tokens/{address}/bundle")
+
+    def token_top_traders(
+        self, address: str, *, limit: int | None = None, offset: int | None = None
+    ) -> dict:
+        """Top traders of a Robinhood Chain token, ranked by realized ETH (PRO+).
+
+        Lifetime per-trader performance on one token, enriched with wallet
+        reputation (win-rate, bot heuristic, KOL identity), dump-cluster
+        membership and early-buyer rank.
+
+        ``net_eth`` is REALIZED flow (``sell − buy``) and is **not PnL**: it does
+        not value a trader's remaining bag, so a wallet that bought and still
+        holds ranks last. Use :meth:`wallet_pnl` for FIFO cost-basis PnL.
+
+        Args:
+            address: Token address (``0x`` + 40 hex).
+            limit: Rows to return. Capped at 50 on PRO, 200 on ULTRA/BUSINESS.
+            offset: Page offset.
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/top-traders``. Tier: PRO+.
+        """
+        return self._get(
+            f"/rhc/tokens/{address}/top-traders",
+            params={"limit": limit, "offset": offset},
+        )
+
+    def token_flow(self, address: str, *, window: str | None = None) -> dict:
+        """Net buy/sell flow by trader cohort on a Robinhood Chain token (PRO+).
+
+        Splits the token's flow into mutually-exclusive cohorts so you can see
+        who is accumulating and who is distributing.
+
+        Sign convention: ``net_eth = sell − buy``, so a POSITIVE value means the
+        cohort **distributed** (took ETH out) and negative means it accumulated.
+        Cohorts are assigned by a priority ladder: ``kol`` → ``bot`` →
+        ``dump_cluster`` → ``early_buyer`` → ``unprofiled`` → ``smart_money`` →
+        ``retail``. ``smart_money`` is derived (win-rate >= 0.5 and net
+        positive), and ``unprofiled`` is a real answer — that trader has not met
+        the reputation thresholds. There is no ``fresh_wallet`` cohort because
+        Robinhood Chain stores no wallet-level first-seen.
+
+        Args:
+            address: Token address (``0x`` + 40 hex).
+            window: One of ``1h``, ``6h``, ``24h``, ``7d``. Default ``24h``.
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/flow``. Tier: PRO+.
+        """
+        return self._get(f"/rhc/tokens/{address}/flow", params={"window": window})
+
+    def token_peak_history(
+        self, address: str, *, window: str | None = None, curve: str | None = None
+    ) -> dict:
+        """Peak market cap, drawdown and high-water curve (PRO+).
+
+        Returns **two peaks, because they disagree**.
+        ``peak_mc_usd_recorded`` is the stored high-water mark that every other
+        Robinhood Chain surface keys off (deployer runner-rate, the $40K
+        graduation bar); it is sampled from write batches so it can undercount an
+        intra-batch spike. ``peak_mc_usd_observed`` is the max of 1-minute candle
+        highs — trade-level truth, and always >= recorded.
+
+        Candle history begins 2026-07-15, so check
+        ``observed_covers_full_history`` before treating the observed figure as a
+        lifetime maximum.
+
+        Args:
+            address: Token address (``0x`` + 40 hex).
+            window: One of ``24h``, ``7d``, ``30d``, ``all``. Default ``7d``.
+            curve: ``"false"`` to skip the series and return the summary only.
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/peak-history``. Tier: PRO+.
+        """
+        return self._get(
+            f"/rhc/tokens/{address}/peak-history",
+            params={"window": window, "curve": curve},
+        )
+
+    def token_risk(self, address: str) -> dict:
+        """EVM-native risk assessment, computed LIVE on-chain (PRO+).
+
+        **Not a port of the Solana risk model.** EVM has no mint or freeze
+        authority: across 300 random Robinhood Chain tokens only 2.3% even expose
+        an owner function and 0% expose ``mint`` in their own bytecode, so an
+        absent capability flag is the norm rather than a safety signal.
+
+        The signals that discriminate here are proxy upgradeability, LP custody
+        and above all **sellability**, which is simulated at the chain head via a
+        router call with state overrides and is never cached — whether a token can
+        be sold changes the moment an owner flips a setting.
+
+        Note ``owner.model == "none"`` (no owner function exists) is a different
+        answer from ``"renounced"``. ``lp_custody`` is read only for uniswap-v2
+        pools; v3/v4 liquidity sits in an LP NFT and reports ``"unknown"`` rather
+        than being guessed.
+
+        Args:
+            address: Token address (``0x`` + 40 hex).
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/risk``. Tier: PRO+.
+        """
+        return self._get(f"/rhc/tokens/{address}/risk")
+
+    def token_holders(
+        self, address: str, *, limit: int | None = None, offset: int | None = None
+    ) -> dict:
+        """Exact holder set and concentration for a Robinhood Chain token (PRO+).
+
+        Balances are folded from ERC-20 ``Transfer`` logs — **not** derived from
+        trades — and reconciled against on-chain ``totalSupply()`` at a pinned
+        block.
+
+        **Check ``verified`` first.** ``False`` means the reconstruction is
+        incomplete for that token, and ``unverified_reason`` says why (a token
+        that only recently became liquid legitimately has partial history).
+
+        Concentration **excludes liquidity pools and burn addresses** from the
+        circulating denominator — the largest holder of a token is otherwise its
+        own pool — and reports them separately as ``pool_held_pct`` /
+        ``burned_pct``. ``balance`` is a raw uint256 returned as a decimal
+        **string**; do not coerce it to a float. Holder addresses may be
+        ERC-4337 smart accounts, so ``holder_count`` is not a headcount of people.
+
+        Args:
+            address: Token address (``0x`` + 40 hex).
+            limit: Rows to return. Capped at 50 on PRO, 200 on ULTRA/BUSINESS.
+            offset: Page offset.
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/holders``. Tier: PRO+.
+        """
+        return self._get(
+            f"/rhc/tokens/{address}/holders",
+            params={"limit": limit, "offset": offset},
+        )
 
     def token_batch(self, addresses: Sequence[str]) -> t.TokenBatchResponse:
         """Up to 50 Robinhood Chain tokens in ONE call (BASIC+).
