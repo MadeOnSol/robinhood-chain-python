@@ -30,7 +30,7 @@ for t in feed["trades"]:
     print(t["kol_name"], t["action"], t["token_address"], t["eth_amount"], "ETH", t["tx_hash"])
 ```
 
-`GET https://madeonsol.com/api/v1/rhc/kol/feed` → every buy/sell from tracked KOLs' verified EVM wallets on Robinhood Chain, attributed via `tx.from`, sub-second from execution, enriched with live MC and `mc_multiple_since_trade` ("did the call run").
+`GET https://madeonsol.com/api/v1/rhc/kol/feed` → every buy/sell from tracked KOLs' verified EVM wallets on Robinhood Chain, attributed to the effective trading account (`tx.from`, or the ERC-4337 userOp sender when the trade was bundled), sub-second from execution, enriched with live MC and `mc_multiple_since_trade` ("did the call run").
 
 ## Authentication
 
@@ -193,7 +193,8 @@ print(bq["scored"], "of", bq["requested"], "scored; cap is", bq["max_addresses"]
 ### DEX trade tape & candles (PRO+)
 
 ```python
-# Every Uniswap v2/v3/v4 swap — trader_eoa is the real wallet (tx.from), not the router
+# Every Uniswap v2/v3/v4 swap — trader_eoa is the effective trading account
+# (tx.from, or the ERC-4337 userOp sender when bundled), never the router or the bundler
 tape = client.trades(dex="uniswap-v3", min_eth=0.1, limit=50)
 for s in tape["trades"]:
     print(s["trader_eoa"], s["action"], s["eth_amount"], "ETH", s["tx_hash"], s["block_number"])

@@ -140,7 +140,7 @@ class DexTrade(TypedDict, total=False):
     dex: str
     pool: str
     trader: Optional[str]
-    trader_eoa: Optional[str]
+    trader_eoa: Optional[str]  # effective trading account: tx.from, or the ERC-4337 userOp sender when bundled
     router: Optional[str]
     token_address: Optional[str]
     action: Optional[str]

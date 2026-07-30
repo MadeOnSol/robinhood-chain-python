@@ -267,9 +267,10 @@ class RobinhoodClient:
         """Real-time KOL trade feed on Robinhood Chain (BASIC+).
 
         Every buy/sell from tracked KOLs' verified EVM wallets on chain 4663,
-        attributed via ``tx.from``. Each row carries ``token_address``,
-        ``eth_amount``, ``tx_hash``, ``block_number``, live MC enrichment and
-        ``mc_multiple_since_trade`` (did the call run).
+        attributed to the effective trading account (``tx.from``, or the
+        ERC-4337 userOp sender when the trade was bundled). Each row carries
+        ``token_address``, ``eth_amount``, ``tx_hash``, ``block_number``, live
+        MC enrichment and ``mc_multiple_since_trade`` (did the call run).
 
         Args:
             limit: Max trades (1–100, default 50).
@@ -449,9 +450,11 @@ class RobinhoodClient:
     ) -> t.TradesResponse:
         """Robinhood Chain DEX trade tape (PRO+).
 
-        Every Uniswap v2/v3/v4 swap on chain 4663. Each row carries the real
-        trader wallet (``trader_eoa`` = ``tx.from``, not the router),
-        gas/ordering for MEV analysis, pool state, and KOL/deployer flags.
+        Every Uniswap v2/v3/v4 swap on chain 4663. Each row carries the
+        effective trading account (``trader_eoa`` — ``tx.from`` normally, or
+        the ERC-4337 userOp sender when the trade was bundled; never the
+        router or the bundler), gas/ordering for MEV analysis, pool state,
+        and KOL/deployer flags.
 
         Args:
             limit: Max trades (1–100, default 50).
