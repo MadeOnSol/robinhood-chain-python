@@ -1,7 +1,7 @@
 """Robinhood Chain API client (EVM-native, chain id 4663).
 
-``RobinhoodClient`` is a thin, typed wrapper over the 30 endpoints (28 GET + 2
-batch POST) under
+``RobinhoodClient`` is a thin, typed wrapper over the 52 operations (38 GET,
+6 POST, 4 PATCH, 4 DELETE) under
 ``https://madeonsol.com/api/v1/rhc/*``. Auth is a Bearer ``msk_`` API key — the
 same key and base URL as the Solana MadeOnSol API; Robinhood Chain coverage is
 bundled into every tier at no extra cost. This also serves the x402-Py key-mode
@@ -32,6 +32,38 @@ CHAIN_ID = 4663
 
 # HTTP statuses worth retrying (transient): rate-limit + 5xx.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+class _Null:
+    """Sentinel type for :data:`NULL`."""
+
+    _instance: Optional["_Null"] = None
+
+    def __new__(cls) -> "_Null":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return "robinhood_chain.NULL"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: Explicit JSON ``null`` for the rule-engine update methods.
+#:
+#: Omitting a keyword leaves the field untouched; passing ``NULL`` clears it.
+#: Python's ``None`` cannot mean both, and the routes validate with strict
+#: schemas that reject an explicit ``null`` on non-nullable fields — so
+#: "unset" and "set to null" have to be different values::
+#:
+#:     client.copytrade_subscriptions_update(7, name=NULL)  # clears the label
+#:     client.copytrade_subscriptions_update(7, is_active=False)  # name untouched
+#:
+#: Only ``name``, ``webhook_url``, ``min_mc_usd`` and ``max_mc_usd`` are
+#: nullable on the wire.
+NULL = _Null()
 
 
 class RobinhoodClient:
@@ -252,6 +284,128 @@ class RobinhoodClient:
                     continue
                 self._raise_for_status(resp)
                 return resp.json()
+
+    def _patch(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
+        """Synchronous PATCH (JSON body) with retry on transient failures."""
+        url = f"{self.base_url}{path}"
+        attempt = 0
+        while True:
+            try:
+                resp = httpx.patch(
+                    url, json=json_body, headers=self._headers, timeout=self.timeout
+                )
+            except httpx.HTTPError as exc:
+                if attempt >= self.max_retries:
+                    raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+                time.sleep(_backoff(attempt))
+                attempt += 1
+                continue
+            self._capture_rate_limit(resp)
+            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
+                time.sleep(_backoff(attempt))
+                attempt += 1
+                continue
+            self._raise_for_status(resp)
+            return resp.json()
+
+    async def _apatch(
+        self, path: str, json_body: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """Asynchronous PATCH (JSON body) with retry on transient failures."""
+        url = f"{self.base_url}{path}"
+        attempt = 0
+        async with httpx.AsyncClient(timeout=self.timeout) as http:
+            while True:
+                try:
+                    resp = await http.patch(url, json=json_body, headers=self._headers)
+                except httpx.HTTPError as exc:
+                    if attempt >= self.max_retries:
+                        raise RobinhoodError(
+                            f"Request to {path} failed: {exc}"
+                        ) from exc
+                    await asyncio.sleep(_backoff(attempt))
+                    attempt += 1
+                    continue
+                self._capture_rate_limit(resp)
+                if (
+                    resp.status_code in _RETRY_STATUSES
+                    and attempt < self.max_retries
+                ):
+                    await asyncio.sleep(_backoff(attempt))
+                    attempt += 1
+                    continue
+                self._raise_for_status(resp)
+                return resp.json()
+
+    def _delete(self, path: str) -> Any:
+        """Synchronous DELETE (no body) with retry on transient failures.
+
+        Safe to retry: every rule-engine DELETE is scoped by ``id`` AND
+        ``user_id`` and returns 404 once the row is gone, so a retried delete
+        can never remove someone else's rule.
+        """
+        url = f"{self.base_url}{path}"
+        attempt = 0
+        while True:
+            try:
+                resp = httpx.delete(url, headers=self._headers, timeout=self.timeout)
+            except httpx.HTTPError as exc:
+                if attempt >= self.max_retries:
+                    raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+                time.sleep(_backoff(attempt))
+                attempt += 1
+                continue
+            self._capture_rate_limit(resp)
+            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
+                time.sleep(_backoff(attempt))
+                attempt += 1
+                continue
+            self._raise_for_status(resp)
+            return resp.json()
+
+    async def _adelete(self, path: str) -> Any:
+        """Asynchronous DELETE (no body) with retry on transient failures."""
+        url = f"{self.base_url}{path}"
+        attempt = 0
+        async with httpx.AsyncClient(timeout=self.timeout) as http:
+            while True:
+                try:
+                    resp = await http.delete(url, headers=self._headers)
+                except httpx.HTTPError as exc:
+                    if attempt >= self.max_retries:
+                        raise RobinhoodError(
+                            f"Request to {path} failed: {exc}"
+                        ) from exc
+                    await asyncio.sleep(_backoff(attempt))
+                    attempt += 1
+                    continue
+                self._capture_rate_limit(resp)
+                if (
+                    resp.status_code in _RETRY_STATUSES
+                    and attempt < self.max_retries
+                ):
+                    await asyncio.sleep(_backoff(attempt))
+                    attempt += 1
+                    continue
+                self._raise_for_status(resp)
+                return resp.json()
+
+    @staticmethod
+    def _body(fields: Dict[str, Any]) -> Dict[str, Any]:
+        """Drop ``None`` values from a write body.
+
+        The routes use strict Zod schemas, so an explicit ``None`` for an
+        omitted keyword would be rejected rather than treated as "unset". Fields
+        that are genuinely nullable on the wire (``name``, ``webhook_url``,
+        ``min_mc_usd``, ``max_mc_usd``) are passed through a ``_NULL`` sentinel
+        instead — see :data:`NULL`.
+        """
+        out: Dict[str, Any] = {}
+        for key, val in fields.items():
+            if val is None:
+                continue
+            out[key] = None if val is NULL else val
+        return out
 
     # ── KOL: feed / leaderboard / hot-tokens / profile ─────────────────────
 
@@ -1173,6 +1327,624 @@ class RobinhoodClient:
             },
         )
 
+    # ── Rule engine: copy-trade ────────────────────────────────────────────
+
+    def copytrade_subscriptions_list(self) -> t.CopyTradeListResponse:
+        """Your Robinhood Chain copy-trade rules (PRO+).
+
+        Quotas are PER CHAIN — PRO 3 rules x 5 wallets / ULTRA 20 x 50 /
+        BUSINESS 100 x 250, independent of your Solana copy-trade rules.
+
+        Route: ``GET /api/v1/rhc/copytrade/subscriptions``. Tier: PRO.
+        """
+        return self._get("/rhc/copytrade/subscriptions")
+
+    def copytrade_subscriptions_create(
+        self,
+        *,
+        source_wallets: Sequence[str],
+        sizing_amount: float,
+        name: Optional[str] = None,
+        min_trade_eth: Optional[float] = None,
+        only_action: Optional[str] = None,
+        sizing_mode: Optional[str] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[str] = None,
+    ) -> t.CopyTradeCreateResponse:
+        """Create a copy-trade rule on Robinhood Chain (PRO+).
+
+        Fires when one of ``source_wallets`` trades on chain 4663. Two
+        deliberate differences from the Solana engine, both forced by what the
+        producer emits: amounts are **ETH**, not SOL, and there is no
+        ``min_mc_usd``/``max_mc_usd`` band — the RHC notify payload carries no
+        market cap, so a band could only be a per-event DB lookup in the hot
+        path of a ~3.3M trades/day chain, or a filter that silently never
+        matches.
+
+        ``webhook_secret`` is returned **once**. Payloads are signed HMAC-SHA256
+        over ``<timestamp>.<body>`` in the ``X-MadeOnSol-Signature`` header.
+
+        Args:
+            source_wallets: 1–250 EVM addresses (``0x`` + 40 hex). Lowercased on
+                write; the per-tier cap is enforced server-side (400 if over).
+            sizing_amount: ETH when ``sizing_mode='fixed'``, else a multiplier
+                of the source trade. Must be > 0.
+            name: Optional label (1–64 chars).
+            min_trade_eth: Minimum source-trade size in ETH (default 0).
+            only_action: ``'buy'`` (default) | ``'sell'`` | ``'both'``.
+            sizing_mode: ``'fixed'`` (default) | ``'proportional'`` |
+                ``'percent_source'``.
+            delivery_mode: ``'webhook'`` (default) | ``'websocket'`` |
+                ``'both'``.
+            webhook_url: HTTPS only. Required unless
+                ``delivery_mode='websocket'``.
+
+        Route: ``POST /api/v1/rhc/copytrade/subscriptions``. Tier: PRO. 409 when
+        the tier's rule limit is already reached.
+        """
+        return self._post(
+            "/rhc/copytrade/subscriptions",
+            self._body(
+                {
+                    "name": name,
+                    "source_wallets": list(source_wallets),
+                    "min_trade_eth": min_trade_eth,
+                    "only_action": only_action,
+                    "sizing_mode": sizing_mode,
+                    "sizing_amount": sizing_amount,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                }
+            ),
+        )
+
+    def copytrade_subscriptions_get(
+        self, subscription_id: int
+    ) -> t.CopyTradeGetResponse:
+        """Fetch one Robinhood Chain copy-trade rule (PRO+).
+
+        Args:
+            subscription_id: Numeric rule id.
+
+        Route: ``GET /api/v1/rhc/copytrade/subscriptions/{id}``. Tier: PRO.
+        404 if the rule is not yours.
+        """
+        return self._get(f"/rhc/copytrade/subscriptions/{subscription_id}")
+
+    def copytrade_subscriptions_update(
+        self,
+        subscription_id: int,
+        *,
+        name: Optional[Any] = None,
+        source_wallets: Optional[Sequence[str]] = None,
+        min_trade_eth: Optional[float] = None,
+        only_action: Optional[str] = None,
+        sizing_mode: Optional[str] = None,
+        sizing_amount: Optional[float] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[Any] = None,
+        is_active: Optional[bool] = None,
+    ) -> t.CopyTradeGetResponse:
+        """Partially update a Robinhood Chain copy-trade rule (PRO+).
+
+        Only the fields you pass are changed. The per-tier wallet cap is
+        re-checked, so a PRO rule created at 5 wallets cannot be PATCHed to 250.
+
+        Args:
+            subscription_id: Numeric rule id.
+            name: New label, or :data:`NULL` to clear it.
+            source_wallets: Replacement wallet list (whole-list replace).
+            min_trade_eth: Minimum source-trade size in ETH.
+            only_action: ``'buy'`` | ``'sell'`` | ``'both'``.
+            sizing_mode: ``'fixed'`` | ``'proportional'`` | ``'percent_source'``.
+            sizing_amount: ETH or multiplier, per ``sizing_mode``.
+            delivery_mode: ``'webhook'`` | ``'websocket'`` | ``'both'``.
+            webhook_url: New HTTPS URL, or :data:`NULL` to clear it.
+            is_active: Pause (``False``) or resume (``True``) the rule.
+
+        Route: ``PATCH /api/v1/rhc/copytrade/subscriptions/{id}``. Tier: PRO.
+        400 when no fields are supplied.
+        """
+        return self._patch(
+            f"/rhc/copytrade/subscriptions/{subscription_id}",
+            self._body(
+                {
+                    "name": name,
+                    "source_wallets": list(source_wallets) if source_wallets else None,
+                    "min_trade_eth": min_trade_eth,
+                    "only_action": only_action,
+                    "sizing_mode": sizing_mode,
+                    "sizing_amount": sizing_amount,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                    "is_active": is_active,
+                }
+            ),
+        )
+
+    def copytrade_subscriptions_delete(
+        self, subscription_id: int
+    ) -> t.DeletedResponse:
+        """Delete a Robinhood Chain copy-trade rule (PRO+).
+
+        Its recorded signals cascade with it.
+
+        Args:
+            subscription_id: Numeric rule id.
+
+        Route: ``DELETE /api/v1/rhc/copytrade/subscriptions/{id}``. Tier: PRO.
+        """
+        return self._delete(f"/rhc/copytrade/subscriptions/{subscription_id}")
+
+    def copytrade_signals(
+        self,
+        *,
+        subscription_id: Optional[int] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> t.CopyTradeSignalsResponse:
+        """Fire history for your RHC copy-trade rules (PRO+).
+
+        The catch-up path for a consumer that missed a webhook or was
+        disconnected from the ``rhc:copytrade:signals`` channel. Retained 7 days.
+
+        Args:
+            subscription_id: Scope to one of your rules. 404 if you do not own
+                it. Omit for every rule you have.
+            since: ISO 8601 lower bound on ``fired_at``.
+            limit: Max signals (1–500, default 50).
+
+        Route: ``GET /api/v1/rhc/copytrade/signals``. Tier: PRO.
+        """
+        return self._get(
+            "/rhc/copytrade/signals",
+            {
+                "subscription_id": subscription_id,
+                "since": since,
+                "limit": limit,
+            },
+        )
+
+    # ── Rule engine: price alerts ──────────────────────────────────────────
+
+    def price_alerts_list(self) -> t.PriceAlertListResponse:
+        """Your Robinhood Chain price alerts (PRO+).
+
+        Quota is per chain — RHC alerts do not consume the Solana budget.
+
+        Route: ``GET /api/v1/rhc/price-alerts``. Tier: PRO.
+        """
+        return self._get("/rhc/price-alerts")
+
+    def price_alerts_create(
+        self,
+        *,
+        token_address: str,
+        drop_pct: float,
+        name: Optional[str] = None,
+        recovery_pct: Optional[float] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[str] = None,
+    ) -> t.PriceAlertCreateResponse:
+        """Create a Robinhood Chain price alert (PRO+).
+
+        The baseline market cap is captured **at creation**, so the alert is a
+        delta from the moment you set it — the token must already be tracked on
+        RHC with a market cap, else 400.
+
+        ⚠️ RHC alerts are POLLED (~15s off ``rhc_token_prices``), not evaluated
+        inside a live price loop: the RHC price writer runs on a separate box
+        and emits no ``pg_notify``, so there is nothing to react to. Effective
+        latency is that interval plus the token's own price-update cadence — do
+        NOT assume parity with the Solana alerts, which are sub-second. The
+        response spells this out in its ``evaluation`` block.
+
+        Args:
+            token_address: Token address (``0x`` + 40 hex), lowercased on write.
+            drop_pct: Drop from baseline that fires the dip (0.01–99.99).
+            name: Optional label (1–64 chars).
+            recovery_pct: Bounce off the dip low that fires a recovery
+                (0.01–1000). Omit for a dip-only, terminal alert.
+            delivery_mode: ``'webhook'`` (default) | ``'websocket'`` |
+                ``'both'``.
+            webhook_url: HTTPS only. Required unless
+                ``delivery_mode='websocket'``.
+
+        Route: ``POST /api/v1/rhc/price-alerts``. Tier: PRO. 409 when the tier's
+        alert limit is already reached.
+        """
+        return self._post(
+            "/rhc/price-alerts",
+            self._body(
+                {
+                    "name": name,
+                    "token_address": token_address,
+                    "drop_pct": drop_pct,
+                    "recovery_pct": recovery_pct,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                }
+            ),
+        )
+
+    def price_alerts_get(self, alert_id: int) -> t.PriceAlertGetResponse:
+        """Fetch one Robinhood Chain price alert (PRO+).
+
+        Args:
+            alert_id: Numeric alert id.
+
+        Route: ``GET /api/v1/rhc/price-alerts/{id}``. Tier: PRO. 404 if the
+        alert is not yours.
+        """
+        return self._get(f"/rhc/price-alerts/{alert_id}")
+
+    def price_alerts_update(
+        self,
+        alert_id: int,
+        *,
+        name: Optional[Any] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[Any] = None,
+        is_active: Optional[bool] = None,
+    ) -> t.PriceAlertGetResponse:
+        """Update a Robinhood Chain price alert (PRO+).
+
+        ``token_address``, ``drop_pct`` and ``recovery_pct`` are immutable —
+        retuning the threshold of an already-dipped alert would make its
+        recorded events uninterpretable. Delete and recreate instead.
+
+        Args:
+            alert_id: Numeric alert id.
+            name: New label, or :data:`NULL` to clear it.
+            delivery_mode: ``'webhook'`` | ``'websocket'`` | ``'both'``.
+            webhook_url: New HTTPS URL, or :data:`NULL` to clear it.
+            is_active: Pause (``False``) or resume (``True``) the alert.
+
+        Route: ``PATCH /api/v1/rhc/price-alerts/{id}``. Tier: PRO. 400 when no
+        fields are supplied.
+        """
+        return self._patch(
+            f"/rhc/price-alerts/{alert_id}",
+            self._body(
+                {
+                    "name": name,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                    "is_active": is_active,
+                }
+            ),
+        )
+
+    def price_alerts_delete(self, alert_id: int) -> t.DeletedResponse:
+        """Delete a Robinhood Chain price alert (PRO+).
+
+        Its recorded dip/recovery events cascade with it.
+
+        Args:
+            alert_id: Numeric alert id.
+
+        Route: ``DELETE /api/v1/rhc/price-alerts/{id}``. Tier: PRO.
+        """
+        return self._delete(f"/rhc/price-alerts/{alert_id}")
+
+    def price_alerts_events(
+        self,
+        *,
+        alert_id: Optional[int] = None,
+        event_type: Optional[str] = None,
+        since: Optional[str] = None,
+        limit: int = 50,
+    ) -> t.PriceAlertEventsResponse:
+        """Dip and recovery fire history for your RHC alerts (PRO+).
+
+        The catch-up path when a webhook was missed or the
+        ``rhc:price_alert:events`` channel was disconnected. Retained 30 days.
+
+        Args:
+            alert_id: Scope to one of your alerts. 404 if you do not own it.
+            event_type: ``'dip'`` or ``'recovery'``.
+            since: ISO 8601 lower bound on ``fired_at``.
+            limit: Max events (1–500, default 50).
+
+        Route: ``GET /api/v1/rhc/price-alerts/events``. Tier: PRO.
+        """
+        return self._get(
+            "/rhc/price-alerts/events",
+            {
+                "alert_id": alert_id,
+                "event_type": event_type,
+                "since": since,
+                "limit": limit,
+            },
+        )
+
+    # ── Rule engine: KOL coordination ──────────────────────────────────────
+
+    def coordination_alerts_list(self) -> t.CoordinationAlertListResponse:
+        """Your Robinhood Chain coordination alert rules (PRO+).
+
+        Quota is per chain. See :meth:`kol_coordination` for the read-only feed
+        of what is coordinating right now.
+
+        Route: ``GET /api/v1/rhc/kol/coordination/alerts``. Tier: PRO.
+        """
+        return self._get("/rhc/kol/coordination/alerts")
+
+    def coordination_alerts_create(
+        self,
+        *,
+        name: Optional[str] = None,
+        min_kols: Optional[int] = None,
+        window_minutes: Optional[int] = None,
+        min_score: Optional[int] = None,
+        cooldown_min: Optional[int] = None,
+        score_jump_break: Optional[int] = None,
+        min_mc_usd: Optional[float] = None,
+        max_mc_usd: Optional[float] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[str] = None,
+    ) -> t.CoordinationAlertCreateResponse:
+        """Create a Robinhood Chain coordination alert rule (PRO+).
+
+        Fires when N+ tracked KOLs buy the same RHC token inside a rolling
+        window.
+
+        Scoring is the shared v1 scorer, so the number is comparable to Solana,
+        but the ``earliness`` component is **defaulted** on RHC (no early-entry
+        equivalent exists) while ``quality`` is a real KOL win-rate. Every fired
+        signal records which components were real in its ``score_inputs``, and
+        the create response returns the same breakdown as ``scoring``.
+
+        Args:
+            name: Optional label (1–64 chars).
+            min_kols: Distinct KOL buyers needed to fire (2–50, default 3).
+            window_minutes: Rolling window they must land inside (1–60,
+                default 15).
+            min_score: Minimum coordination score to deliver (0–100, default 0).
+            cooldown_min: Minutes before the same token can fire again (1–1440,
+                default 30).
+            score_jump_break: Score jump that breaks the cooldown early (0–100,
+                default 20).
+            min_mc_usd: Lower bound on market cap (USD).
+            max_mc_usd: Upper bound on market cap (USD). Must be >=
+                ``min_mc_usd``.
+            delivery_mode: ``'websocket'`` (default) | ``'webhook'`` |
+                ``'both'``.
+            webhook_url: HTTPS only. Required unless
+                ``delivery_mode='websocket'``.
+
+        Route: ``POST /api/v1/rhc/kol/coordination/alerts``. Tier: PRO. 409 when
+        the tier's rule limit is already reached.
+        """
+        return self._post(
+            "/rhc/kol/coordination/alerts",
+            self._body(
+                {
+                    "name": name,
+                    "min_kols": min_kols,
+                    "window_minutes": window_minutes,
+                    "min_score": min_score,
+                    "cooldown_min": cooldown_min,
+                    "score_jump_break": score_jump_break,
+                    "min_mc_usd": min_mc_usd,
+                    "max_mc_usd": max_mc_usd,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                }
+            ),
+        )
+
+    def coordination_alerts_get(self, rule_id: str) -> t.CoordinationAlertGetResponse:
+        """Fetch one Robinhood Chain coordination rule (PRO+).
+
+        Args:
+            rule_id: Rule UUID.
+
+        Route: ``GET /api/v1/rhc/kol/coordination/alerts/{id}``. Tier: PRO.
+        400 on a malformed UUID, 404 if the rule is not yours.
+        """
+        return self._get(f"/rhc/kol/coordination/alerts/{rule_id}")
+
+    def coordination_alerts_update(
+        self,
+        rule_id: str,
+        *,
+        name: Optional[Any] = None,
+        min_kols: Optional[int] = None,
+        window_minutes: Optional[int] = None,
+        min_score: Optional[int] = None,
+        cooldown_min: Optional[int] = None,
+        score_jump_break: Optional[int] = None,
+        min_mc_usd: Optional[Any] = None,
+        max_mc_usd: Optional[Any] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[Any] = None,
+        is_active: Optional[bool] = None,
+    ) -> t.CoordinationAlertGetResponse:
+        """Partially update a Robinhood Chain coordination rule (PRO+).
+
+        The MC band is only cross-checked when BOTH bounds arrive in the same
+        call; the table CHECK is the real backstop.
+
+        Args:
+            rule_id: Rule UUID.
+            name: New label, or :data:`NULL` to clear it.
+            min_kols: Distinct KOL buyers needed to fire (2–50).
+            window_minutes: Rolling window (1–60).
+            min_score: Minimum coordination score (0–100).
+            cooldown_min: Per-token cooldown in minutes (1–1440).
+            score_jump_break: Score jump that breaks the cooldown (0–100).
+            min_mc_usd: Lower MC bound, or :data:`NULL` to remove it.
+            max_mc_usd: Upper MC bound, or :data:`NULL` to remove it.
+            delivery_mode: ``'websocket'`` | ``'webhook'`` | ``'both'``.
+            webhook_url: New HTTPS URL, or :data:`NULL` to clear it.
+            is_active: Pause (``False``) or resume (``True``) the rule.
+
+        Route: ``PATCH /api/v1/rhc/kol/coordination/alerts/{id}``. Tier: PRO.
+        400 when no fields are supplied.
+        """
+        return self._patch(
+            f"/rhc/kol/coordination/alerts/{rule_id}",
+            self._body(
+                {
+                    "name": name,
+                    "min_kols": min_kols,
+                    "window_minutes": window_minutes,
+                    "min_score": min_score,
+                    "cooldown_min": cooldown_min,
+                    "score_jump_break": score_jump_break,
+                    "min_mc_usd": min_mc_usd,
+                    "max_mc_usd": max_mc_usd,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                    "is_active": is_active,
+                }
+            ),
+        )
+
+    def coordination_alerts_delete(self, rule_id: str) -> t.DeletedResponse:
+        """Delete a Robinhood Chain coordination rule (PRO+).
+
+        Its per-token cooldown state and fired signals cascade with it.
+
+        Args:
+            rule_id: Rule UUID.
+
+        Route: ``DELETE /api/v1/rhc/kol/coordination/alerts/{id}``. Tier: PRO.
+        """
+        return self._delete(f"/rhc/kol/coordination/alerts/{rule_id}")
+
+    # ── Rule engine: KOL first touches ─────────────────────────────────────
+
+    def first_touch_subscriptions_list(
+        self,
+    ) -> t.FirstTouchSubscriptionListResponse:
+        """Your Robinhood Chain first-touch subscriptions (ULTRA+).
+
+        Quota is per chain. See :meth:`kol_first_touches` for the read-only feed
+        of first touches that already happened.
+
+        Route: ``GET /api/v1/rhc/kol/first-touches/subscriptions``. Tier: ULTRA.
+        """
+        return self._get("/rhc/kol/first-touches/subscriptions")
+
+    def first_touch_subscriptions_create(
+        self,
+        *,
+        name: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[str] = None,
+    ) -> t.FirstTouchSubscriptionCreateResponse:
+        """Create a Robinhood Chain first-touch subscription (ULTRA+).
+
+        Pushes when a token gets its FIRST tracked-KOL buy — the discovery
+        signal, not a second trade feed.
+
+        The filter set is deliberately NOT the Solana one. RHC has no
+        ``mv_kol_scout_score``, so ``min_scout_tier`` and ``min_n_touches`` are
+        not offered at all rather than silently matching nothing; what RHC does
+        have is a KOL win-rate, so ``min_kol_winrate`` and ``strategy`` are the
+        quality gates. Unknown filter keys are REJECTED with a 400.
+
+        Args:
+            name: Optional label (1–64 chars).
+            filters: Any of ``kol`` (``0x`` + 40 hex), ``min_first_buy_eth``
+                (0–100000), ``min_kol_winrate`` (0–1, measured on CLOSED
+                positions — a KOL who has never sold is unscored and drops out
+                rather than counting as a loser), ``strategy``
+                (``'scalper'`` | ``'day_trader'`` | ``'swing'`` | ``'inactive'``
+                | ``'unscored'``), ``min_mc_usd``, ``max_mc_usd``. Default
+                ``{}`` = every first touch.
+            delivery_mode: ``'websocket'`` (default) | ``'webhook'`` |
+                ``'both'``.
+            webhook_url: HTTPS only. Required unless
+                ``delivery_mode='websocket'``.
+
+        Route: ``POST /api/v1/rhc/kol/first-touches/subscriptions``.
+        Tier: ULTRA. 409 when the tier's subscription limit is already reached.
+        """
+        return self._post(
+            "/rhc/kol/first-touches/subscriptions",
+            self._body(
+                {
+                    "name": name,
+                    "filters": filters,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                }
+            ),
+        )
+
+    def first_touch_subscriptions_get(
+        self, subscription_id: str
+    ) -> t.FirstTouchSubscriptionGetResponse:
+        """Fetch one Robinhood Chain first-touch subscription (ULTRA+).
+
+        Args:
+            subscription_id: Subscription UUID.
+
+        Route: ``GET /api/v1/rhc/kol/first-touches/subscriptions/{id}``.
+        Tier: ULTRA. 400 on a malformed UUID, 404 if it is not yours.
+        """
+        return self._get(f"/rhc/kol/first-touches/subscriptions/{subscription_id}")
+
+    def first_touch_subscriptions_update(
+        self,
+        subscription_id: str,
+        *,
+        name: Optional[Any] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        delivery_mode: Optional[str] = None,
+        webhook_url: Optional[Any] = None,
+        is_active: Optional[bool] = None,
+    ) -> t.FirstTouchSubscriptionGetResponse:
+        """Update a Robinhood Chain first-touch subscription (ULTRA+).
+
+        ``filters`` is a whole-object **replace**, not a merge — merging would
+        make "remove this filter" impossible to express. Send the complete
+        filter set you want, or ``{}`` to clear every filter.
+
+        Args:
+            subscription_id: Subscription UUID.
+            name: New label, or :data:`NULL` to clear it.
+            filters: Replacement filter object (see
+                :meth:`first_touch_subscriptions_create`).
+            delivery_mode: ``'websocket'`` | ``'webhook'`` | ``'both'``.
+            webhook_url: New HTTPS URL, or :data:`NULL` to clear it.
+            is_active: Pause (``False``) or resume (``True``) the subscription.
+
+        Route: ``PATCH /api/v1/rhc/kol/first-touches/subscriptions/{id}``.
+        Tier: ULTRA. 400 when no fields are supplied.
+        """
+        return self._patch(
+            f"/rhc/kol/first-touches/subscriptions/{subscription_id}",
+            self._body(
+                {
+                    "name": name,
+                    "filters": filters,
+                    "delivery_mode": delivery_mode,
+                    "webhook_url": webhook_url,
+                    "is_active": is_active,
+                }
+            ),
+        )
+
+    def first_touch_subscriptions_delete(
+        self, subscription_id: str
+    ) -> t.DeletedResponse:
+        """Delete a Robinhood Chain first-touch subscription (ULTRA+).
+
+        Args:
+            subscription_id: Subscription UUID.
+
+        Route: ``DELETE /api/v1/rhc/kol/first-touches/subscriptions/{id}``.
+        Tier: ULTRA.
+        """
+        return self._delete(
+            f"/rhc/kol/first-touches/subscriptions/{subscription_id}"
+        )
+
     # ── async ──────────────────────────────────────────────────────────────
 
     def aclient(self) -> "AsyncRobinhoodClient":
@@ -1189,7 +1961,7 @@ class RobinhoodClient:
 class AsyncRobinhoodClient:
     """Async wrapper around :class:`RobinhoodClient`.
 
-    Each of the 25 endpoint methods is exposed as a coroutine with the same
+    Each of the 52 endpoint methods is exposed as a coroutine with the same
     signature as its sync twin. The endpoint methods build their (path, params
     or JSON body) on the shared sync instance and dispatch through the async
     transport, so the two paths can never drift.
@@ -1205,8 +1977,13 @@ class AsyncRobinhoodClient:
 
         async def _call(*args: Any, **kwargs: Any) -> Any:
             rec = _capture_request(self._sync, sync_method, args, kwargs)
-            if rec.get("method") == "POST":
+            method = rec.get("method")
+            if method == "POST":
                 return await self._sync._apost(rec.get("path"), rec.get("json"))
+            if method == "PATCH":
+                return await self._sync._apatch(rec.get("path"), rec.get("json"))
+            if method == "DELETE":
+                return await self._sync._adelete(rec.get("path"))
             return await self._sync._aget(rec.get("path"), rec.get("params"))
 
         _call.__name__ = name
@@ -1230,6 +2007,11 @@ _GET_ENDPOINTS = frozenset(
         "token_kol_consensus",
         "token_buyer_quality",
         "token_bundle",
+        "token_top_traders",
+        "token_flow",
+        "token_peak_history",
+        "token_risk",
+        "token_holders",
         "deployer_hunter_leaderboard",
         "deployer_hunter_profile",
         "deployer_hunter_alerts",
@@ -1240,6 +2022,17 @@ _GET_ENDPOINTS = frozenset(
         "deployer_hunter_tokens",
         "deployer_hunter_history",
         "alpha_wallets",
+        # Rule-engine reads.
+        "copytrade_subscriptions_list",
+        "copytrade_subscriptions_get",
+        "copytrade_signals",
+        "price_alerts_list",
+        "price_alerts_get",
+        "price_alerts_events",
+        "coordination_alerts_list",
+        "coordination_alerts_get",
+        "first_touch_subscriptions_list",
+        "first_touch_subscriptions_get",
     }
 )
 
@@ -1248,11 +2041,37 @@ _POST_ENDPOINTS = frozenset(
     {
         "token_batch",
         "tokens_batch_buyer_quality",
+        "copytrade_subscriptions_create",
+        "price_alerts_create",
+        "coordination_alerts_create",
+        "first_touch_subscriptions_create",
     }
 )
 
-# Every dispatch-only endpoint method, GET and POST alike.
-_ENDPOINTS = _GET_ENDPOINTS | _POST_ENDPOINTS
+# The PATCH endpoint methods (each ends in a single ``self._patch``).
+_PATCH_ENDPOINTS = frozenset(
+    {
+        "copytrade_subscriptions_update",
+        "price_alerts_update",
+        "coordination_alerts_update",
+        "first_touch_subscriptions_update",
+    }
+)
+
+# The DELETE endpoint methods (each ends in a single ``self._delete``).
+_DELETE_ENDPOINTS = frozenset(
+    {
+        "copytrade_subscriptions_delete",
+        "price_alerts_delete",
+        "coordination_alerts_delete",
+        "first_touch_subscriptions_delete",
+    }
+)
+
+# Every dispatch-only endpoint method, whatever its verb.
+_ENDPOINTS = (
+    _GET_ENDPOINTS | _POST_ENDPOINTS | _PATCH_ENDPOINTS | _DELETE_ENDPOINTS
+)
 
 # Backwards-compatible alias — this used to be the GET-only set.
 _ENDPOINTS_GET = _GET_ENDPOINTS
@@ -1261,13 +2080,13 @@ _ENDPOINTS_GET = _GET_ENDPOINTS
 def _capture_request(
     client: RobinhoodClient, sync_method: Any, args: tuple, kwargs: dict
 ) -> Dict[str, Any]:
-    """Run a sync endpoint method with its ``_get``/``_post`` stubbed out to
-    record the request it would have made — used to drive the async transport
-    from the exact same argument-parsing code. Scoped to a fresh throwaway
-    client copy so the live client's transport is never mutated.
+    """Run a sync endpoint method with its transport stubbed out to record the
+    request it would have made — used to drive the async transport from the
+    exact same argument-parsing code. Scoped to a fresh throwaway client copy so
+    the live client's transport is never mutated.
 
-    Returns ``{'method', 'path', 'params'}`` for a GET or
-    ``{'method', 'path', 'json'}`` for a POST."""
+    Returns ``{'method', 'path', 'params'}`` for a GET, ``{'method', 'path',
+    'json'}`` for a POST/PATCH, or ``{'method', 'path'}`` for a DELETE."""
     recorder: Dict[str, Any] = {}
 
     def _get_stub(path: str, params: Optional[Dict[str, Any]] = None) -> None:
@@ -1282,23 +2101,44 @@ def _capture_request(
         recorder["json"] = json_body
         return None
 
-    # Bind the sync method to a shallow proxy whose only overrides are ``_get``
-    # and ``_post``, leaving the real client untouched (thread-safe, no
+    def _patch_stub(path: str, json_body: Optional[Dict[str, Any]] = None) -> None:
+        recorder["method"] = "PATCH"
+        recorder["path"] = path
+        recorder["json"] = json_body
+        return None
+
+    def _delete_stub(path: str) -> None:
+        recorder["method"] = "DELETE"
+        recorder["path"] = path
+        return None
+
+    # Bind the sync method to a shallow proxy whose only overrides are the four
+    # transport methods, leaving the real client untouched (thread-safe, no
     # attribute mutation).
-    proxy = _RecordingProxy(client, _get_stub, _post_stub)
+    proxy = _RecordingProxy(client, _get_stub, _post_stub, _patch_stub, _delete_stub)
     sync_method.__func__(proxy, *args, **kwargs)
     return recorder
 
 
 class _RecordingProxy:
-    """Delegates every attribute to the wrapped client except ``_get`` and
-    ``_post``, which are replaced by recorders. Lets us reuse a sync method's
-    body without touching the shared client instance."""
+    """Delegates every attribute to the wrapped client except ``_get``,
+    ``_post``, ``_patch`` and ``_delete``, which are replaced by recorders. Lets
+    us reuse a sync method's body without touching the shared client
+    instance."""
 
-    def __init__(self, client: RobinhoodClient, get_stub: Any, post_stub: Any) -> None:
+    def __init__(
+        self,
+        client: RobinhoodClient,
+        get_stub: Any,
+        post_stub: Any,
+        patch_stub: Any,
+        delete_stub: Any,
+    ) -> None:
         object.__setattr__(self, "_client", client)
         object.__setattr__(self, "_get", get_stub)
         object.__setattr__(self, "_post", post_stub)
+        object.__setattr__(self, "_patch", patch_stub)
+        object.__setattr__(self, "_delete", delete_stub)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(object.__getattribute__(self, "_client"), name)

@@ -810,5 +810,237 @@ class AlphaWalletsResponse(TypedDict, total=False):
     has_more: bool
 
 
+# ── /rhc/copytrade/subscriptions ──
+
+
+class CopyTradeSubscription(TypedDict, total=False):
+    id: int
+    name: Optional[str]
+    source_wallets: List[str]  # lowercase 0x — the API lowercases on write
+    min_trade_eth: float
+    only_action: str  # "buy" | "sell" | "both"
+    sizing_mode: str  # "fixed" | "proportional" | "percent_source"
+    sizing_amount: float  # ETH when sizing_mode == "fixed", else a multiplier
+    delivery_mode: str  # "webhook" | "websocket" | "both"
+    webhook_url: Optional[str]
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class CopyTradeListResponse(TypedDict, total=False):
+    chain: str
+    subscriptions: List[CopyTradeSubscription]
+
+
+class CopyTradeCreateResponse(TypedDict, total=False):
+    chain: str
+    subscription: CopyTradeSubscription
+    webhook_secret: Optional[str]  # shown ONCE; None for websocket delivery
+    note: str
+
+
+class CopyTradeGetResponse(TypedDict, total=False):
+    chain: str
+    subscription: CopyTradeSubscription
+
+
+class DeletedResponse(TypedDict, total=False):
+    """Every rule-engine DELETE returns this."""
+
+    chain: str
+    deleted: bool
+
+
+# ── /rhc/copytrade/signals ──
+
+
+class CopyTradeSignal(TypedDict, total=False):
+    id: int
+    subscription_id: int
+    fired_at: str
+    source_wallet: str  # the followed wallet whose trade fired the rule
+    action: str  # "buy" | "sell"
+    token_address: str
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    source_eth_amount: Optional[float]  # size of the source trade
+    suggested_eth_amount: Optional[float]  # size your sizing_mode implies
+    price_usd: Optional[float]
+    dex: Optional[str]
+    tx_hash: str
+    delivered: bool
+    delivered_at: Optional[str]
+
+
+class CopyTradeSignalsResponse(TypedDict, total=False):
+    chain: str
+    signals: List[CopyTradeSignal]
+    count: int
+
+
+# ── /rhc/price-alerts ──
+
+
+class PriceAlert(TypedDict, total=False):
+    id: int
+    name: Optional[str]
+    token_address: str
+    token_symbol: Optional[str]
+    baseline_mc_usd: float  # captured at creation — the alert is a delta from it
+    drop_pct: float
+    recovery_pct: Optional[float]  # None = dip-only, terminal alert
+    status: str  # "watching" | "dipped" | "recovered" | "expired"
+    dip_low_mc_usd: Optional[float]
+    dip_fired_at: Optional[str]
+    delivery_mode: str
+    webhook_url: Optional[str]
+    is_active: bool
+    expires_at: str  # alerts self-expire 30 days after creation
+    created_at: str
+    updated_at: str
+
+
+class PriceAlertListResponse(TypedDict, total=False):
+    chain: str
+    alerts: List[PriceAlert]
+
+
+class PriceAlertEvaluation(TypedDict, total=False):
+    """How RHC alerts are evaluated — polled, NOT a live price loop."""
+
+    mode: str  # "polled"
+    interval_seconds: int
+    note: str
+
+
+class PriceAlertCreateResponse(TypedDict, total=False):
+    chain: str
+    alert: PriceAlert
+    webhook_secret: Optional[str]  # shown ONCE; None for websocket delivery
+    evaluation: PriceAlertEvaluation
+    note: str
+
+
+class PriceAlertGetResponse(TypedDict, total=False):
+    chain: str
+    alert: PriceAlert
+
+
+# ── /rhc/price-alerts/events ──
+
+
+class PriceAlertEvent(TypedDict, total=False):
+    id: int
+    alert_id: int
+    event_type: str  # "dip" | "recovery"
+    fired_at: str
+    token_address: str
+    baseline_mc_usd: float
+    current_mc_usd: float
+    drop_pct_actual: Optional[float]
+    dip_low_mc_usd: Optional[float]
+    recovery_pct_actual: Optional[float]  # recovery events only
+    delivered: bool
+    delivered_at: Optional[str]
+
+
+class PriceAlertEventsResponse(TypedDict, total=False):
+    chain: str
+    events: List[PriceAlertEvent]
+    count: int
+
+
+# ── /rhc/kol/coordination/alerts ──
+
+
+class CoordinationAlertRule(TypedDict, total=False):
+    id: str  # UUID
+    name: Optional[str]
+    min_kols: int
+    window_minutes: int
+    min_score: int
+    cooldown_min: int
+    score_jump_break: int
+    min_mc_usd: Optional[float]
+    max_mc_usd: Optional[float]
+    delivery_mode: str
+    webhook_url: Optional[str]
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class CoordinationAlertListResponse(TypedDict, total=False):
+    chain: str
+    rules: List[CoordinationAlertRule]
+
+
+class CoordinationAlertScoring(TypedDict, total=False):
+    """Which scorer components are real on RHC — ``earliness`` is defaulted."""
+
+    score_version: str
+    quality: str
+    earliness: str
+    note: str
+
+
+class CoordinationAlertCreateResponse(TypedDict, total=False):
+    chain: str
+    rule: CoordinationAlertRule
+    webhook_secret: Optional[str]  # shown ONCE; None for websocket delivery
+    scoring: CoordinationAlertScoring
+    note: str
+
+
+class CoordinationAlertGetResponse(TypedDict, total=False):
+    chain: str
+    rule: CoordinationAlertRule
+
+
+# ── /rhc/kol/first-touches/subscriptions ──
+
+
+class FirstTouchFilters(TypedDict, total=False):
+    """Push filters. NOT the Solana set: RHC has no scout score, so
+    ``min_scout_tier`` / ``min_n_touches`` do not exist here. Unknown keys are
+    rejected with a 400, not ignored."""
+
+    kol: str  # lowercase 0x EVM address
+    min_first_buy_eth: float
+    min_kol_winrate: float  # 0–1, on CLOSED positions; never-sold KOLs drop out
+    strategy: str  # "scalper" | "day_trader" | "swing" | "inactive" | "unscored"
+    min_mc_usd: float
+    max_mc_usd: float
+
+
+class FirstTouchSubscription(TypedDict, total=False):
+    id: str  # UUID
+    name: Optional[str]
+    filters: FirstTouchFilters
+    delivery_mode: str
+    webhook_url: Optional[str]
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class FirstTouchSubscriptionListResponse(TypedDict, total=False):
+    chain: str
+    subscriptions: List[FirstTouchSubscription]
+
+
+class FirstTouchSubscriptionCreateResponse(TypedDict, total=False):
+    chain: str
+    subscription: FirstTouchSubscription
+    webhook_secret: Optional[str]  # shown ONCE; None for websocket delivery
+    note: str
+
+
+class FirstTouchSubscriptionGetResponse(TypedDict, total=False):
+    chain: str
+    subscription: FirstTouchSubscription
+
+
 # Loose alias for callers who just want the raw dict.
 JSON = Any

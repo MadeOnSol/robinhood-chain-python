@@ -4,7 +4,7 @@ Solana MadeOnSol API."""
 
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
-from .client import RobinhoodClient
+from .client import RobinhoodClient, NULL
 from .errors import (
     RobinhoodError,
     RobinhoodAPIError,
@@ -16,6 +16,7 @@ from .errors import (
 
 __all__ = [
     "RobinhoodClient",
+    "NULL",
     "RobinhoodError",
     "RobinhoodAPIError",
     "AuthError",

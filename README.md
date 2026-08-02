@@ -9,7 +9,7 @@
 
 **Robinhood Chain SDK for Python — EVM-native trading intelligence, chain id 4663.**
 
-Live KOL trades and consensus clustering, token discovery, launch-bundle detection, early-buyer quality, deployer reputation with alerts and trajectory, the Uniswap v2/v3/v4 trade tape, OHLC candles, batch token lookups, and smart-money wallet ranking — for [Robinhood Chain](https://madeonsol.com/robinhood) (an Arbitrum Orbit L2, chain id **4663**), served from our self-hosted node. Everything is EVM-native: lowercase `0x` addresses (`token_address`), `eth_amount`, `tx_hash`, `block_number`, `net_flow_eth`. No Solana field names.
+Live KOL trades and consensus clustering, token discovery, launch-bundle detection, early-buyer quality, holders and live on-chain risk, deployer reputation with alerts and trajectory, the Uniswap v2/v3/v4 trade tape, OHLC candles, batch token lookups, smart-money wallet ranking, and four push rule engines (copy-trade, price alerts, KOL coordination, first touches) — for [Robinhood Chain](https://madeonsol.com/robinhood) (an Arbitrum Orbit L2, chain id **4663**), served from our self-hosted node. Everything is EVM-native: lowercase `0x` addresses (`token_address`), `eth_amount`, `tx_hash`, `block_number`, `net_flow_eth`. No Solana field names.
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card. Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
@@ -43,9 +43,9 @@ from robinhood_chain import RobinhoodClient
 client = RobinhoodClient(api_key=os.environ["MADEONSOL_API_KEY"])
 ```
 
-## Endpoints — the 25 Robinhood Chain routes
+## Endpoints — the 52 Robinhood Chain operations
 
-Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 hex).
+Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 hex). Everything is a GET except the two batch POSTs and the four rule engines, which are full CRUD.
 
 ### KOL intelligence
 
@@ -71,6 +71,11 @@ Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 he
 | `client.token_buyer_quality(address)` | `GET /api/v1/rhc/tokens/{address}/buyer-quality` | BASIC |
 | `client.tokens_batch_buyer_quality(addresses)` — max **20** | `POST /api/v1/rhc/tokens/batch/buyer-quality` | BASIC |
 | `client.token_bundle(address)` | `GET /api/v1/rhc/tokens/{address}/bundle` | BASIC |
+| `client.token_top_traders(address, limit=, offset=)` | `GET /api/v1/rhc/tokens/{address}/top-traders` | PRO+ |
+| `client.token_flow(address, window=)` | `GET /api/v1/rhc/tokens/{address}/flow` | PRO+ |
+| `client.token_peak_history(address, window=, curve=)` | `GET /api/v1/rhc/tokens/{address}/peak-history` | PRO+ |
+| `client.token_risk(address)` | `GET /api/v1/rhc/tokens/{address}/risk` | PRO+ |
+| `client.token_holders(address, limit=, offset=)` | `GET /api/v1/rhc/tokens/{address}/holders` | PRO+ |
 
 ### Deployer hunter
 
@@ -91,6 +96,75 @@ Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 he
 | Method | Route | Tier |
 |---|---|---|
 | `client.alpha_wallets(classification=, identity=, min_memecoin_share=, sort=, limit=, offset=, ...)` | `GET /api/v1/rhc/alpha-wallets` | PRO+ |
+
+### Rule engines — push, not polling
+
+Four server-side rule engines that watch the RHC tape for you and deliver over webhook or WebSocket. **Every quota is per chain** — configuring RHC rules never consumes your Solana budget. `webhook_secret` is returned exactly once on create; payloads are signed HMAC-SHA256 over `<timestamp>.<body>` in the `X-MadeOnSol-Signature` header.
+
+| Method | Route | Tier |
+|---|---|---|
+| `client.copytrade_subscriptions_list()` | `GET /api/v1/rhc/copytrade/subscriptions` | PRO+ |
+| `client.copytrade_subscriptions_create(source_wallets=, sizing_amount=, name=, min_trade_eth=, only_action=, sizing_mode=, delivery_mode=, webhook_url=)` | `POST /api/v1/rhc/copytrade/subscriptions` | PRO+ |
+| `client.copytrade_subscriptions_get(subscription_id)` | `GET /api/v1/rhc/copytrade/subscriptions/{id}` | PRO+ |
+| `client.copytrade_subscriptions_update(subscription_id, **fields)` | `PATCH /api/v1/rhc/copytrade/subscriptions/{id}` | PRO+ |
+| `client.copytrade_subscriptions_delete(subscription_id)` | `DELETE /api/v1/rhc/copytrade/subscriptions/{id}` | PRO+ |
+| `client.copytrade_signals(subscription_id=, since=, limit=)` | `GET /api/v1/rhc/copytrade/signals` | PRO+ |
+| `client.price_alerts_list()` | `GET /api/v1/rhc/price-alerts` | PRO+ |
+| `client.price_alerts_create(token_address=, drop_pct=, name=, recovery_pct=, delivery_mode=, webhook_url=)` | `POST /api/v1/rhc/price-alerts` | PRO+ |
+| `client.price_alerts_get(alert_id)` | `GET /api/v1/rhc/price-alerts/{id}` | PRO+ |
+| `client.price_alerts_update(alert_id, **fields)` | `PATCH /api/v1/rhc/price-alerts/{id}` | PRO+ |
+| `client.price_alerts_delete(alert_id)` | `DELETE /api/v1/rhc/price-alerts/{id}` | PRO+ |
+| `client.price_alerts_events(alert_id=, event_type=, since=, limit=)` | `GET /api/v1/rhc/price-alerts/events` | PRO+ |
+| `client.coordination_alerts_list()` | `GET /api/v1/rhc/kol/coordination/alerts` | PRO+ |
+| `client.coordination_alerts_create(min_kols=, window_minutes=, min_score=, cooldown_min=, score_jump_break=, min_mc_usd=, max_mc_usd=, delivery_mode=, webhook_url=)` | `POST /api/v1/rhc/kol/coordination/alerts` | PRO+ |
+| `client.coordination_alerts_get(rule_id)` | `GET /api/v1/rhc/kol/coordination/alerts/{id}` | PRO+ |
+| `client.coordination_alerts_update(rule_id, **fields)` | `PATCH /api/v1/rhc/kol/coordination/alerts/{id}` | PRO+ |
+| `client.coordination_alerts_delete(rule_id)` | `DELETE /api/v1/rhc/kol/coordination/alerts/{id}` | PRO+ |
+| `client.first_touch_subscriptions_list()` | `GET /api/v1/rhc/kol/first-touches/subscriptions` | ULTRA+ |
+| `client.first_touch_subscriptions_create(name=, filters=, delivery_mode=, webhook_url=)` | `POST /api/v1/rhc/kol/first-touches/subscriptions` | ULTRA+ |
+| `client.first_touch_subscriptions_get(subscription_id)` | `GET /api/v1/rhc/kol/first-touches/subscriptions/{id}` | ULTRA+ |
+| `client.first_touch_subscriptions_update(subscription_id, **fields)` | `PATCH /api/v1/rhc/kol/first-touches/subscriptions/{id}` | ULTRA+ |
+| `client.first_touch_subscriptions_delete(subscription_id)` | `DELETE /api/v1/rhc/kol/first-touches/subscriptions/{id}` | ULTRA+ |
+
+Copy-trade rules are **ETH**-denominated and carry no MC band — the RHC notify payload has no market cap, so a band could only be a per-event DB lookup in the hot path of a ~3.3M trades/day chain, or a filter that silently never matches.
+
+**RHC price alerts are polled (~15s), not live.** `rhc_token_prices` is written by the RHC ingester on a separate box and emits no `pg_notify`, so there is nothing to react to. Effective latency is that interval plus the token's own price-update cadence — do **not** assume parity with the Solana alerts, which are sub-second. The create response says so in its `evaluation` block. `token_address`, `drop_pct` and `recovery_pct` are immutable once set; delete and recreate to retune.
+
+**Coordination scoring is comparable to Solana, not identical.** The shared v1 scorer runs and `quality` is a real KOL win-rate, but `earliness` is **defaulted** — RHC has no early-entry equivalent. Every fired signal records which components were real in `score_inputs`.
+
+**First-touch filters are not the Solana set.** RHC has no scout score, so `min_scout_tier` and `min_n_touches` do not exist here rather than silently matching nothing; `min_kol_winrate` and `strategy` are the quality gates. Unknown filter keys are rejected with a 400. On update, `filters` is a whole-object **replace**, not a merge.
+
+#### Clearing a field: `NULL` vs omitting it
+
+Omitting a keyword leaves the field untouched; passing `NULL` sets it to JSON `null`. Python's `None` cannot mean both, and the routes validate with strict schemas that reject an explicit `null` on non-nullable fields. Only `name`, `webhook_url`, `min_mc_usd` and `max_mc_usd` are nullable on the wire.
+
+```python
+from robinhood_chain import RobinhoodClient, NULL
+
+client = RobinhoodClient(api_key="msk_...")
+
+# Follow three wallets, 0.05 ETH per copy, pushed over WebSocket
+sub = client.copytrade_subscriptions_create(
+    name="degen desk",
+    source_wallets=["0xaaa...", "0xbbb...", "0xccc..."],
+    min_trade_eth=0.01,
+    sizing_mode="fixed",
+    sizing_amount=0.05,
+    delivery_mode="websocket",
+)
+
+# Catch up on anything the webhook missed
+sigs = client.copytrade_signals(subscription_id=sub["subscription"]["id"], limit=100)
+
+# Pause the rule and drop its label — is_active is untouched by the NULL
+client.copytrade_subscriptions_update(sub["subscription"]["id"], name=NULL, is_active=False)
+
+# Alert me if this token drops 30% from where it is right now
+client.price_alerts_create(
+    token_address="0xToken...", drop_pct=30, recovery_pct=15,
+    webhook_url="https://example.com/hook",
+)
+```
 
 ### Deployer tiers — what `elite` actually means
 
@@ -320,6 +394,10 @@ async def main():
     batch = await a.token_batch(["0xaaa...", "0xbbb..."])
     print(batch["found"], "of", batch["requested"], "found")
 
+    # So do the rule-engine writes (POST / PATCH / DELETE)
+    rules = await a.coordination_alerts_list()
+    print(len(rules["rules"]), "coordination rules")
+
 asyncio.run(main())
 ```
 
@@ -352,8 +430,8 @@ print(client.last_rate_limit)
 | Tier | Robinhood Chain endpoints |
 |---|---|
 | BASIC (free) | KOL feed/leaderboard/hot-tokens/coordination/first-touches/profile, token snapshot + batch, buyer-quality (single + batch), bundle, deployer-hunter leaderboard/alerts/best-tokens/recent-bonds/stats/profile/trajectory/tokens |
-| PRO+ | + DEX trade tape, token discovery, candles, KOL consensus, deployer-hunter history, alpha-wallets |
-| ULTRA | + full alert pagination (`limit` above 50), KOL `evm_address` on first-touches, full bundle cohort + consensus wallet lists |
+| PRO+ | + DEX trade tape, token discovery, candles, KOL consensus, top-traders, flow, peak-history, risk, holders, deployer-hunter history, alpha-wallets, and the copy-trade / price-alert / coordination rule engines |
+| ULTRA | + full alert pagination (`limit` above 50), KOL `evm_address` on first-touches, full bundle cohort + consensus wallet lists, first-touch push subscriptions |
 
 Robinhood Chain is bundled into every tier at no extra cost. Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
