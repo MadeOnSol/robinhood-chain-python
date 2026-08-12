@@ -13,6 +13,8 @@ Live KOL trades and consensus clustering, token discovery, launch-bundle detecti
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card. Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
+> **New in 0.5.0 — real-time WebSocket streaming.** A managed stream client (`client.stream()`) over `wss://madeonsol.com/ws/v1/stream` with auto-reconnect, 24h-token refresh and typed callbacks, covering all six RHC channels — the KOL tape, the full DEX firehose, and the four rule-engine push channels. Channel names are the **canonical** server registry (`rhc:dex_trades`, not the `rhc:trades` spelling some 0.4.0 SDKs used — the server still accepts that as a deprecated alias). Needs the `stream` extra: `pip install "robinhood-chain[stream]"`. See [Real-time streaming](#real-time-streaming-new-in-050).
+
 ## Quick start (10 seconds)
 
 ```bash
@@ -400,6 +402,61 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Real-time streaming *(new in 0.5.0)*
+
+Managed WebSocket stream — auto-reconnect with backoff, 24h-token auto-refresh (`POST /api/v1/stream/token` under the hood), heartbeat liveness, and typed callbacks. Needs the `stream` extra:
+
+```bash
+pip install "robinhood-chain[stream]"
+```
+
+```python
+import asyncio
+from robinhood_chain import RobinhoodClient
+
+client = RobinhoodClient(api_key="msk_...")
+
+async def main():
+    stream = client.stream()
+
+    @stream.on("rhc:kol_trade")
+    async def on_kol_trade(data, evt):
+        print(data["kol_name"], data["action"], data["token_address"], data["eth_amount"], "ETH")
+
+    @stream.on("rhc:kol:first_touch")
+    async def on_first_touch(data):
+        print("FIRST TOUCH", data["token_address"])
+
+    @stream.on("warning")
+    async def on_warning(msg):
+        # e.g. code == "channels_rejected": you asked for a channel that does
+        # not exist or that your tier cannot hold — msg["rejected"] carries a
+        # per-channel reason, msg["valid_channels"] the full list.
+        print("stream warning:", msg)
+
+    stream.subscribe(["rhc:kol_trades", "rhc:kol:first_touches"])
+    await stream.run()   # blocks; manages connection + reconnects
+
+asyncio.run(main())
+```
+
+All six RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
+
+| Channel | What it delivers (event names) | Tier |
+|---|---|---|
+| `rhc:kol_trades` | Every tracked-KOL trade on chain 4663 (`rhc:kol_trade`) | PRO+ |
+| `rhc:dex_trades` | The full DEX firehose — every attributed Uniswap v2/v3/v4 swap, ~40–55/s at tip (`rhc:dex_trade`) | **ULTRA+** |
+| `rhc:copytrade:signals` | Your copy-trade rule fires, user-scoped (`rhc:copytrade:signal`) | PRO+ |
+| `rhc:price_alert:events` | Your price-alert dips/recoveries, user-scoped (`rhc:price_alert:dip` / `rhc:price_alert:recovery`) — ~15s polled server-side, **not** sub-second | PRO+ |
+| `rhc:kol:coordination` | Coordination-alert fires (`rhc:kol:coordination`) | PRO+ |
+| `rhc:kol:first_touches` | Broadcast first-touch feed (`rhc:kol:first_touch`) — the **channel** is PRO+; ULTRA gates the first-touch *subscription* CRUD endpoints, not this broadcast | PRO+ |
+
+Lifecycle events: `open`, `close`, `reconnect`, `subscribed`, `heartbeat`, `warning`, `error`, plus `"*"` for every data event. Deprecated spelling: the server accepts `rhc:trades` as an alias of `rhc:dex_trades` (some 0.4.0 SDKs shipped it); this SDK uses only canonical names.
+
+**Invalid channels are never silent.** If a subscribe names an unknown or tier-gated channel, the server answers with a `{type: "warning", code: "channels_rejected", rejected, valid_channels}` frame. The stream client delivers it to your `on("warning")` handler — and if you registered none, surfaces it via Python's `warnings.warn` so a rejected channel can't masquerade as a quiet market.
+
+If you'd rather hand-roll the WebSocket, `client.stream_token()` (sync) / `client.aclient().stream_token()` (async) returns `{"token", "expires_at", "next_refresh_at", "ws_url", "channels", ...}` — connect to `{ws_url}?token={token}` and send `{"type": "subscribe", "channels": [...]}`.
 
 ## Errors & rate limits
 

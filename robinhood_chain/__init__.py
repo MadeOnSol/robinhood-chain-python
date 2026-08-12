@@ -13,9 +13,13 @@ from .errors import (
     NotFoundError,
     RateLimitError,
 )
+# Safe to import unconditionally: stream.py only imports `websockets` inside
+# RobinhoodStream.run(), so the [stream] extra is not required at import time.
+from .stream import RobinhoodStream
 
 __all__ = [
     "RobinhoodClient",
+    "RobinhoodStream",
     "NULL",
     "RobinhoodError",
     "RobinhoodAPIError",

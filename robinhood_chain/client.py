@@ -2,7 +2,9 @@
 
 ``RobinhoodClient`` is a thin, typed wrapper over the 52 operations (38 GET,
 6 POST, 4 PATCH, 4 DELETE) under
-``https://madeonsol.com/api/v1/rhc/*``. Auth is a Bearer ``msk_`` API key — the
+``https://madeonsol.com/api/v1/rhc/*``, plus the shared WebSocket streaming
+surface (``POST /stream/token`` and the managed :meth:`RobinhoodClient.stream`
+client). Auth is a Bearer ``msk_`` API key — the
 same key and base URL as the Solana MadeOnSol API; Robinhood Chain coverage is
 bundled into every tier at no extra cost. This also serves the x402-Py key-mode
 surface (Bearer auth only; the Solana-native pay-per-call rail is not ported).
@@ -1945,6 +1947,62 @@ class RobinhoodClient:
             f"/rhc/kol/first-touches/subscriptions/{subscription_id}"
         )
 
+    # ── Streaming ──────────────────────────────────────────────────────────
+
+    def stream_token(self) -> Dict[str, Any]:
+        """Issue a 24h WebSocket streaming token (PRO+).
+
+        Returns ``token``, ``expires_at``, ``next_refresh_at`` (rotate ~1h
+        before expiry), ``ws_url`` (``wss://madeonsol.com/ws/v1/stream`` — the
+        endpoint ALL six RHC channels ride; unlike Solana there is no separate
+        RHC firehose endpoint), the full ``channels`` list the server accepts,
+        a ``subscribe_example``, a human-readable ``usage`` string, and — on
+        ULTRA/BUSINESS only — ``dex_ws_url``, the separate *Solana* DEX
+        firehose endpoint (not used for RHC).
+
+        Idempotent-ish: while your current token still has >6h of life (and
+        your tier is unchanged) the same token is returned, so multi-process
+        clients minting at boot do not invalidate each other. On rotation the
+        previous token stays valid for a 60s grace window.
+
+        Prefer :meth:`stream` unless you are hand-rolling the WebSocket.
+
+        Route: ``POST /api/v1/stream/token``. Tier: PRO+.
+        """
+        return self._post("/stream/token")
+
+    def stream(
+        self, *, auto_reconnect: bool = True, max_backoff: float = 30.0
+    ) -> "RobinhoodStream":
+        """Open a managed real-time WebSocket stream — auto-reconnect, 24h-token
+        refresh, and typed callbacks. Requires the optional ``websockets``
+        extra::
+
+            pip install "robinhood-chain[stream]"
+
+        Example::
+
+            stream = client.stream()
+            stream.on("rhc:kol_trade", lambda d: print(d["token_address"]))
+            stream.subscribe(["rhc:kol_trades"])
+            await stream.run()
+
+        The six channels are listed in :data:`robinhood_chain.stream.CHANNELS`
+        (``rhc:dex_trades`` is ULTRA+; the rest are PRO+). If a subscribe names
+        an invalid or tier-gated channel the server answers with a
+        ``channels_rejected`` warning frame — register
+        ``stream.on("warning", ...)`` to handle it, or it is raised through
+        :func:`warnings.warn` so it can never pass silently.
+        """
+        from .stream import RobinhoodStream
+
+        async def _token() -> Dict[str, Any]:
+            return await asyncio.to_thread(self.stream_token)
+
+        return RobinhoodStream(
+            _token, auto_reconnect=auto_reconnect, max_backoff=max_backoff
+        )
+
     # ── async ──────────────────────────────────────────────────────────────
 
     def aclient(self) -> "AsyncRobinhoodClient":
@@ -1961,8 +2019,8 @@ class RobinhoodClient:
 class AsyncRobinhoodClient:
     """Async wrapper around :class:`RobinhoodClient`.
 
-    Each of the 52 endpoint methods is exposed as a coroutine with the same
-    signature as its sync twin. The endpoint methods build their (path, params
+    Each endpoint method (the 52 RHC operations plus ``stream_token``) is
+    exposed as a coroutine with the same signature as its sync twin. The endpoint methods build their (path, params
     or JSON body) on the shared sync instance and dispatch through the async
     transport, so the two paths can never drift.
     """
@@ -2041,6 +2099,9 @@ _POST_ENDPOINTS = frozenset(
     {
         "token_batch",
         "tokens_batch_buyer_quality",
+        # Streaming token mint (POST /stream/token — shared surface, not
+        # /rhc/*; kept here so aclient().stream_token() works).
+        "stream_token",
         "copytrade_subscriptions_create",
         "price_alerts_create",
         "coordination_alerts_create",
