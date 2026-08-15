@@ -1329,6 +1329,224 @@ class RobinhoodClient:
             },
         )
 
+    # ── Wallet intelligence ────────────────────────────────────────────────
+    #
+    # ``wallet``, ``wallet_pnl`` and ``wallet_positions`` read from ONE shared
+    # 90-day snapshot cache, so calling all three on the same address costs
+    # roughly one computation, not three — ``cache_hit`` says which call paid
+    # for it. Everything is ETH-denominated.
+
+    def wallet(self, address: str) -> t.WalletProfileResponse:
+        """Any Robinhood Chain wallet's 90-day trading profile (PRO+).
+
+        FIFO cost-basis PnL, per-token breakdown, recent trades, and a
+        reputation block: tracked KOL, known deployer + tier, alpha-ranked,
+        dump-cluster membership, early-buyer count.
+
+        ``stats.unattributed_trades`` counts pre-2026-07-18 rows whose
+        ``trader_eoa`` is NULL — unattributable by design, not a gap you can
+        backfill. ``stats_unavailable`` is True when the snapshot timed out;
+        ``flags`` still resolve in that case.
+
+        Args:
+            address: Wallet EVM address (``0x`` + 40 hex). Case-insensitive.
+
+        Route: ``GET /api/v1/rhc/wallet/{address}``. Tier: PRO+.
+        """
+        return self._get(f"/rhc/wallet/{address}")
+
+    def wallet_pnl(self, address: str) -> t.WalletPnlResponse:
+        """Full FIFO cost-basis PnL for one RHC wallet over 90 days (PRO+).
+
+        Realized/unrealized split, a daily realized curve, every closed
+        position with ROI and hold time, and every open position marked to the
+        current price. This is the *same* FIFO implementation as the Solana
+        ``/wallet/{address}/pnl``, so the two chains are directly comparable.
+
+        ``notes.cost_basis_observable_from`` is the date the window opens: buys
+        before it are invisible, which is why a long-held position can show as
+        a sell with no matching buy.
+
+        Args:
+            address: Wallet EVM address (``0x`` + 40 hex).
+
+        Route: ``GET /api/v1/rhc/wallet/{address}/pnl``. Tier: PRO+.
+        """
+        return self._get(f"/rhc/wallet/{address}/pnl")
+
+    def wallet_positions(self, address: str) -> t.WalletPositionsResponse:
+        """Only what the wallet still holds, marked to market (PRO+).
+
+        The same FIFO pass as :meth:`wallet_pnl` without the curve and closed
+        positions — for clients polling "what is this wallet in right now".
+
+        Check ``positions[].liquidity_basis``: ``'v4_virtual_ceiling'`` means
+        ``liquidity_usd`` is a bonding-curve ceiling, NOT withdrawable TVL, so
+        do not size an exit against it.
+
+        Args:
+            address: Wallet EVM address (``0x`` + 40 hex).
+
+        Route: ``GET /api/v1/rhc/wallet/{address}/positions``. Tier: PRO+.
+        """
+        return self._get(f"/rhc/wallet/{address}/positions")
+
+    def wallet_trades(
+        self,
+        address: str,
+        *,
+        limit: int = 50,
+        before: Optional[str] = None,
+        since: Optional[str] = None,
+        action: Optional[str] = None,
+        token: Optional[str] = None,
+    ) -> t.WalletTradesResponse:
+        """One wallet's swaps, newest first, cursor-paginated (PRO+).
+
+        Distinct from ``trades(token=...)``: that filters the global tape by
+        TOKEN, this filters by WALLET — a different index path.
+
+        Poll forward by passing the previous response's ``next_before`` back as
+        ``before``; the cursor is an opaque keyset, not an offset.
+
+        Args:
+            address: Wallet EVM address (``0x`` + 40 hex).
+            limit: Page size (1–200, default 50).
+            before: Opaque cursor from a prior response's ``next_before``.
+            since: ISO-8601 timestamp with offset.
+            action: ``'buy'`` | ``'sell'``.
+            token: Restrict to one token address (``0x`` + 40 hex).
+
+        Route: ``GET /api/v1/rhc/wallet/{address}/trades``. Tier: PRO+.
+        """
+        return self._get(
+            f"/rhc/wallet/{address}/trades",
+            {
+                "limit": limit,
+                "before": before,
+                "since": since,
+                "action": action,
+                "token": token,
+            },
+        )
+
+    # ── Wallet tracker (watchlist) ─────────────────────────────────────────
+
+    def wallet_tracker_list(self) -> t.WalletTrackerWatchlistResponse:
+        """Your Robinhood Chain watchlist (PRO+).
+
+        Quotas are **per chain** — PRO 50 / ULTRA 100 / BUSINESS 500 RHC
+        wallets, independent of your Solana watchlist, so adopting RHC never
+        shrinks an existing Solana list.
+
+        Route: ``GET /api/v1/rhc/wallet-tracker/watchlist``. Tier: PRO+.
+        """
+        return self._get("/rhc/wallet-tracker/watchlist")
+
+    def wallet_tracker_add(
+        self, wallet_address: str, *, label: Optional[str] = None
+    ) -> t.WalletTrackerWalletResponse:
+        """Add a wallet to your RHC watchlist (PRO+).
+
+        The address is stored lowercase so it matches ``rhc_trades.trader_eoa``
+        — a checksummed ``0xAbC…`` would join to nothing and look like a
+        permanently silent wallet. Returns 409 if already tracked.
+
+        Args:
+            wallet_address: Wallet EVM address (``0x`` + 40 hex).
+            label: Optional human label.
+
+        Route: ``POST /api/v1/rhc/wallet-tracker/watchlist``. Tier: PRO+.
+        """
+        return self._post(
+            "/rhc/wallet-tracker/watchlist",
+            self._body({"wallet_address": wallet_address, "label": label}),
+        )
+
+    def wallet_tracker_remove(self, address: str) -> t.WalletTrackerRemovedResponse:
+        """Remove a wallet from your RHC watchlist (PRO+).
+
+        Args:
+            address: Tracked wallet EVM address.
+
+        Route: ``DELETE /api/v1/rhc/wallet-tracker/watchlist/{address}``.
+        Tier: PRO+.
+        """
+        return self._delete(f"/rhc/wallet-tracker/watchlist/{address}")
+
+    def wallet_tracker_relabel(
+        self, address: str, label: Optional[str]
+    ) -> t.WalletTrackerWalletResponse:
+        """Relabel a tracked wallet (PRO+).
+
+        Args:
+            address: Tracked wallet EVM address.
+            label: New label, or ``None`` to clear it.
+
+        Route: ``PATCH /api/v1/rhc/wallet-tracker/watchlist/{address}``.
+        Tier: PRO+.
+        """
+        return self._patch(
+            f"/rhc/wallet-tracker/watchlist/{address}", {"label": label}
+        )
+
+    def wallet_tracker_trades(
+        self,
+        *,
+        limit: int = 50,
+        before: Optional[str] = None,
+        wallet: Optional[str] = None,
+        action: Optional[str] = None,
+        token: Optional[str] = None,
+    ) -> t.WalletTrackerTradesResponse:
+        """Merged trade feed across your tracked RHC wallets (PRO+).
+
+        Every trade by every wallet on your watchlist, newest first, each row
+        labelled with its watchlist label. The cursor (``next_before``) is an
+        opaque keyset matching the rest of the RHC tree, not the Solana
+        tracker's integer epoch.
+
+        Args:
+            limit: Page size (1–200, default 50).
+            before: Opaque cursor from a prior response's ``next_before``.
+            wallet: Restrict to one wallet — must already be tracked.
+            action: ``'buy'`` | ``'sell'``.
+            token: Restrict to one token address.
+
+        Route: ``GET /api/v1/rhc/wallet-tracker/trades``. Tier: PRO+.
+        """
+        return self._get(
+            "/rhc/wallet-tracker/trades",
+            {
+                "limit": limit,
+                "before": before,
+                "wallet": wallet,
+                "action": action,
+                "token": token,
+            },
+        )
+
+    def wallet_tracker_summary(
+        self, *, period: str = "7d", wallet: Optional[str] = None
+    ) -> t.WalletTrackerSummaryResponse:
+        """Per-wallet buy/sell/volume rollup across your tracked wallets (PRO+).
+
+        Sourced from ``rhc_trades`` directly, not from a per-subscriber capture
+        log: on RHC every swap is already recorded, so adding a wallet gives
+        you its history immediately rather than only from the moment you
+        started tracking it. (The Solana tracker cannot do this — there, trades
+        are only captured for wallets somebody asked for.)
+
+        Args:
+            period: Lookback window, default ``'7d'``.
+            wallet: Restrict the rollup to one tracked wallet.
+
+        Route: ``GET /api/v1/rhc/wallet-tracker/summary``. Tier: PRO+.
+        """
+        return self._get(
+            "/rhc/wallet-tracker/summary", {"period": period, "wallet": wallet}
+        )
+
     # ── Rule engine: copy-trade ────────────────────────────────────────────
 
     def copytrade_subscriptions_list(self) -> t.CopyTradeListResponse:

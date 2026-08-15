@@ -1042,5 +1042,275 @@ class FirstTouchSubscriptionGetResponse(TypedDict, total=False):
     subscription: FirstTouchSubscription
 
 
+# ── /rhc/wallet/{address} and friends ──
+#
+# Every figure here is ETH-denominated. Cost basis is FIFO over a rolling
+# 90-day window, so "open" means FIFO-unmatched buys inside that window: a
+# position opened before the window looks like a sell with no matching buy.
+# ``cost_basis_observable_from`` and ``partial`` disclose exactly that.
+
+
+class WalletStats(TypedDict, total=False):
+    first_seen: Optional[str]
+    last_seen: Optional[str]
+    total_trades: int
+    analyzed_trades: int  # denominator for every PnL figure
+    unattributed_trades: int  # pre-2026-07-18 rows with NULL trader_eoa
+    unsized_trades: int
+    buys: int
+    sells: int
+    bought_eth: float
+    sold_eth: float
+    realized_pnl_eth: float
+    unrealized_pnl_eth: float
+    total_pnl_eth: float
+    held_value_eth: float
+    unique_tokens: int
+    open_positions: int
+    window_days: int
+    partial: bool
+
+
+class WalletFlags(TypedDict, total=False):
+    is_kol: bool
+    kol_name: Optional[str]
+    is_deployer: bool
+    deployer_tier: Optional[str]
+    deployer_tokens: Optional[int]
+    deployer_runner_rate: Optional[float]
+    is_alpha_tracked: bool
+    alpha_win_rate: Optional[float]
+    alpha_net_eth: Optional[float]
+    alpha_tokens_traded: Optional[int]
+    likely_bot: Optional[bool]
+    is_dumper: bool
+    dump_cluster: Any
+    early_buyer_tokens: int
+
+
+class WalletDerived(TypedDict, total=False):
+    win_rate: Optional[float]
+    wins: int
+    losses: int
+    avg_trade_size_eth: Optional[float]
+    is_active: bool
+
+
+class WalletProfileResponse(TypedDict, total=False):
+    chain: str
+    address: str
+    stats: WalletStats
+    flags: WalletFlags
+    top_tokens: List[Any]
+    recent_trades: List[Any]
+    derived: WalletDerived
+    stats_unavailable: bool
+    cache_hit: bool  # the wallet trio shares one snapshot cache
+
+
+class WalletPnlSummary(TypedDict, total=False):
+    realized_eth: float
+    unrealized_eth: float
+    total_pnl_eth: float
+    total_bought_eth: float
+    total_sold_eth: float
+    wins: int
+    losses: int
+    win_rate: Optional[float]
+    profit_factor: Optional[float]
+    avg_hold_minutes: Optional[int]
+    median_hold_minutes: Optional[int]
+    max_drawdown_eth: float
+    open_positions_count: int
+    closed_positions_count: int
+    total_tokens_traded: int
+    best_realized: Optional[Any]
+    worst_realized: Optional[Any]
+
+
+class PnlCurvePoint(TypedDict, total=False):
+    date: str
+    day_pnl: float
+    cumulative_pnl: float
+    trades: int
+
+
+class ClosedPosition(TypedDict, total=False):
+    token_address: str
+    token_symbol: Optional[str]
+    buy_count: int
+    sell_count: int
+    bought_eth: float
+    sold_eth: float
+    pnl_eth: float
+    roi_pct: Optional[float]
+    hold_minutes: Optional[int]
+    result: str  # 'win' | 'loss' | 'breakeven'
+    first_trade: Optional[str]
+    last_trade: Optional[str]
+
+
+class OpenPosition(TypedDict, total=False):
+    token_address: str
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    launchpad: Optional[str]
+    is_graduated: Optional[bool]
+    token_amount: float
+    cost_basis_eth: float
+    avg_entry_price_eth: float
+    current_price_eth: Optional[float]
+    current_value_eth: Optional[float]
+    unrealized_eth: Optional[float]
+    unrealized_pct: Optional[float]
+    current_mc_usd: Optional[float]
+    liquidity_usd: Optional[float]
+    # 'v4_virtual_ceiling' = bonding-curve ceiling, NOT withdrawable TVL.
+    # Do not size an exit against it. 'measured' = real pool reserves.
+    liquidity_basis: str
+    buys_in_position: int
+    realized_so_far_eth: float
+    first_buy_at: Optional[str]
+    last_buy_at: Optional[str]
+
+
+class WalletPnlNotes(TypedDict, total=False):
+    denomination: str  # always 'ETH'
+    cost_basis_observable_from: str
+    data_through: Optional[str]
+    trades_seen: int
+    trades_analyzed: int
+    trades_unattributed: int
+    trades_unsized: int
+    partial: bool
+    partial_reason: str
+
+
+class WalletPnlResponse(TypedDict, total=False):
+    chain: str
+    address: str
+    window_days: int
+    summary: WalletPnlSummary
+    pnl_curve: List[PnlCurvePoint]
+    closed_positions: List[ClosedPosition]
+    open_positions: List[OpenPosition]
+    notes: WalletPnlNotes
+    cache_hit: bool
+
+
+class WalletPositionsSummary(TypedDict, total=False):
+    open_positions: int
+    total_cost_basis_eth: float
+    total_current_value_eth: float
+    total_unrealized_eth: float
+    unpriced_positions: int  # excluded from the value/unrealized totals
+
+
+class WalletPositionsResponse(TypedDict, total=False):
+    chain: str
+    address: str
+    window_days: int
+    summary: WalletPositionsSummary
+    positions: List[OpenPosition]
+    notes: Any
+
+
+class WalletTrade(TypedDict, total=False):
+    token_address: Optional[str]
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    launchpad: Optional[str]
+    action: Optional[str]  # 'buy' | 'sell'
+    eth_amount: Optional[float]
+    token_amount: Optional[float]
+    price_native: Optional[float]
+    price_usd: Optional[float]
+    mc_usd_at_trade: Optional[float]
+    dex: Optional[str]
+    pool: Optional[str]
+    router: Optional[str]
+    method_selector: Optional[str]
+    tx_hash: str
+    log_index: int
+    block_number: int
+    block_time: str
+
+
+class WalletTradesResponse(TypedDict, total=False):
+    chain: str
+    address: str
+    trades: List[WalletTrade]
+    count: int
+    has_more: bool
+    next_before: Optional[str]  # opaque keyset cursor
+
+
+# ── /rhc/wallet-tracker/* ──
+#
+# Quotas are PER CHAIN: PRO 50 / ULTRA 100 / BUSINESS 500 RHC wallets,
+# independent of the Solana watchlist. Addresses are stored lowercase to match
+# ``rhc_trades.trader_eoa`` — a checksummed ``0xAbC…`` joins to nothing.
+
+
+class TrackedWallet(TypedDict, total=False):
+    wallet_address: str
+    label: Optional[str]
+    added_at: str
+
+
+class WalletTrackerWatchlistResponse(TypedDict, total=False):
+    chain: str
+    wallets: List[TrackedWallet]
+    count: int
+    limit: int  # per-tier cap for this chain
+    remaining: int
+
+
+class WalletTrackerWalletResponse(TypedDict, total=False):
+    chain: str
+    wallet: TrackedWallet
+
+
+class WalletTrackerRemovedResponse(TypedDict, total=False):
+    chain: str
+    removed: str  # the lowercased address
+
+
+class TrackedWalletTrade(WalletTrade, total=False):
+    trader_eoa: Optional[str]
+    label: Optional[str]  # your watchlist label for that wallet
+
+
+class WalletTrackerTradesResponse(TypedDict, total=False):
+    chain: str
+    trades: List[TrackedWalletTrade]
+    count: int
+    has_more: bool
+    next_before: Optional[str]
+
+
+class TrackedWalletStats(TypedDict, total=False):
+    trades: int
+    buys: int
+    sells: int
+    buy_eth: float
+    sell_eth: float
+    net_eth: float
+    tokens_traded: int
+    last_trade_at: Optional[str]
+
+
+class TrackedWalletSummary(TrackedWallet, total=False):
+    stats: TrackedWalletStats
+
+
+class WalletTrackerSummaryResponse(TypedDict, total=False):
+    chain: str
+    period: str
+    interval: str
+    stats_unavailable: bool  # rollup timed out; stats are zeroed, not absent
+    wallets: List[TrackedWalletSummary]
+
+
 # Loose alias for callers who just want the raw dict.
 JSON = Any
