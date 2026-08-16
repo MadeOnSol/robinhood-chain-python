@@ -4,7 +4,7 @@ Solana MadeOnSol API."""
 
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
-from .client import RobinhoodClient, NULL
+from .client import RobinhoodClient, NULL, KeylessNotAvailableError, KEYLESS_ENDPOINTS
 from .errors import (
     RobinhoodError,
     RobinhoodAPIError,
@@ -19,6 +19,8 @@ from .stream import RobinhoodStream
 
 __all__ = [
     "RobinhoodClient",
+    "KeylessNotAvailableError",
+    "KEYLESS_ENDPOINTS",
     "RobinhoodStream",
     "NULL",
     "RobinhoodError",

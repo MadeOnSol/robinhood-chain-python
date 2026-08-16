@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robinhood-chain"
-version = "0.6.0"
+version = "0.7.0"
 description = "Robinhood Chain API SDK for Python (EVM, chain id 4663)"
 readme = "README.md"
 license = {text = "MIT"}
@@ -53,6 +53,7 @@ dependencies = [
 
 [project.optional-dependencies]
 stream = ["websockets>=12"]
+x402 = ["eth-account>=0.10"]
 dev = ["pytest>=7.0"]
 
 [project.urls]

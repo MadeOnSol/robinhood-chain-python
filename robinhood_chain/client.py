@@ -13,6 +13,10 @@ surface (Bearer auth only; the Solana-native pay-per-call rail is not ported).
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import re
+import secrets
 import time
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 from typing import Any, Dict, Optional, Sequence
@@ -31,6 +35,58 @@ except PackageNotFoundError:  # running from source without an installed dist
 
 BASE_URL = "https://madeonsol.com/api/v1"
 CHAIN_ID = 4663
+
+# ── Keyless x402 rail (USDG on Robinhood Chain) — since 0.7.0 ───────────────
+# The 10 endpoints callable without an API key. Kept in sync with the server's
+# X402_PRICES; GET https://madeonsol.com/api/x402/rhc is the source of truth.
+X402_BASE_URL = "https://madeonsol.com/api/x402"
+KEYLESS_ENDPOINTS = (
+    "/rhc/kol/feed",
+    "/rhc/kol/hot-tokens",
+    "/rhc/kol/leaderboard",
+    "/rhc/tokens/{address}",
+    "/rhc/tokens/{address}/buyer-quality",
+    "/rhc/tokens/{address}/kol-consensus",
+    "/rhc/tokens/{address}/risk",
+    "/rhc/tokens/{address}/holders",
+    "/rhc/wallet/{address}/pnl",
+    "/rhc/deployer-hunter/alerts",
+)
+_KEYLESS_SET = frozenset(KEYLESS_ENDPOINTS)
+_RHC_NETWORK = "eip155:4663"
+_USDG_DOMAIN = {
+    "name": "Global Dollar",
+    "version": "1",
+    "chainId": CHAIN_ID,
+    "verifyingContract": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+}
+_TRANSFER_WITH_AUTHORIZATION_TYPES = {
+    "TransferWithAuthorization": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "value", "type": "uint256"},
+        {"name": "validAfter", "type": "uint256"},
+        {"name": "validBefore", "type": "uint256"},
+        {"name": "nonce", "type": "bytes32"},
+    ]
+}
+_AUTH_TTL_SECONDS = 300
+_EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _keyless_template(path: str) -> str:
+    """Collapse a concrete /rhc/... path to its template for the keyless lookup."""
+    return "/".join("{address}" if _EVM_ADDR_RE.match(seg) else seg for seg in path.split("?")[0].split("/"))
+
+
+class KeylessNotAvailableError(RobinhoodError):
+    """Raised when a key-mode-only method is called on a keyless (x402) client."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(
+            f"{path} is not on the keyless x402 rail. Keyless endpoints: {', '.join(KEYLESS_ENDPOINTS)}. "
+            "For everything else pass api_key (free at https://madeonsol.com/pricing)."
+        )
 
 # HTTP statuses worth retrying (transient): rate-limit + 5xx.
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -72,9 +128,16 @@ class RobinhoodClient:
     """Robinhood Chain (chain id 4663) API client.
 
     Args:
-        api_key: MadeOnSol API key (``msk_...``). Required. Get one free — 200
+        api_key: MadeOnSol API key (``msk_...``). Get one free — 200
             req/day, no card — at https://madeonsol.com/pricing. RHC endpoints
-            are bundled into every tier.
+            are bundled into every tier. Key mode: all methods.
+        private_key: Keyless x402 mode (since 0.7.0) — hex private key
+            (``0x...``) of an EVM wallet holding USDG on Robinhood Chain. Pays
+            per call in USDG on the 10 keyless endpoints (``KEYLESS_ENDPOINTS``);
+            every other method raises ``KeylessNotAvailableError``. Needs the
+            optional extra ``robinhood-chain[x402]`` (eth-account). Ignored when
+            ``api_key`` is also given. Read it from the environment — never
+            hard-code it.
         base_url: API base URL (default ``https://madeonsol.com/api/v1``).
         timeout: Per-request timeout in seconds (default 30).
         max_retries: Retries on 429/5xx with exponential backoff (default 2).
@@ -92,34 +155,57 @@ class RobinhoodClient:
         self,
         api_key: Optional[str] = None,
         *,
+        private_key: Optional[str] = None,
         base_url: str = BASE_URL,
+        x402_base_url: str = X402_BASE_URL,
         timeout: float = 30.0,
         max_retries: int = 2,
     ) -> None:
-        if not api_key:
+        self.auth_mode = "key" if api_key else ("x402" if private_key else None)
+        self._account = None
+        self._private_key: Optional[str] = None
+        #: Decoded PAYMENT-RESPONSE of the last paid call (keyless mode).
+        self.last_payment: Optional[Dict[str, Any]] = None
+        if self.auth_mode is None:
             import sys
 
             sys.stderr.write(
-                "\n[robinhood-chain] Missing api_key.\n"
+                "\n[robinhood-chain] Missing api_key (or private_key for keyless x402 mode).\n"
                 "  → Get a free API key (200 req/day, no card) at "
                 "https://madeonsol.com/pricing\n"
-                "  → Then: RobinhoodClient(api_key=os.environ['MADEONSOL_API_KEY'])\n\n"
+                "  → Then: RobinhoodClient(api_key=os.environ['MADEONSOL_API_KEY'])\n"
+                "  → Or keyless: RobinhoodClient(private_key=os.environ['RHC_PAYER_KEY'])  # USDG wallet\n\n"
             )
             raise ValueError(
-                "Provide api_key. Get a free API key at https://madeonsol.com/pricing"
+                "Provide api_key or private_key. Get a free API key at https://madeonsol.com/pricing"
             )
-        if not api_key.startswith("msk_"):
-            raise ValueError(
-                "api_key must start with 'msk_'. Get one at https://madeonsol.com/pricing"
-            )
+        if self.auth_mode == "key":
+            assert api_key is not None
+            if not api_key.startswith("msk_"):
+                raise ValueError(
+                    "api_key must start with 'msk_'. Get one at https://madeonsol.com/pricing"
+                )
+            self._headers = {
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": f"robinhood-chain-python/{_UA_VERSION}",
+                "Accept": "application/json",
+            }
+        else:
+            assert private_key is not None
+            if not re.match(r"^0x[0-9a-fA-F]{64}$", private_key):
+                raise ValueError(
+                    "private_key must be a 0x-prefixed 32-byte hex EVM private key "
+                    "(the wallet that holds USDG on Robinhood Chain)."
+                )
+            self._private_key = private_key
+            self._headers = {
+                "User-Agent": f"robinhood-chain-python/{_UA_VERSION}",
+                "Accept": "application/json",
+            }
         self.base_url = base_url.rstrip("/")
+        self.x402_base_url = x402_base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
-        self._headers = {
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": f"robinhood-chain-python/{_UA_VERSION}",
-            "Accept": "application/json",
-        }
         self.last_rate_limit: Dict[str, Any] = {
             "limit": None,
             "remaining": None,
@@ -183,8 +269,133 @@ class RobinhoodClient:
             reset=self.last_rate_limit.get("reset"),
         )
 
+    # ── keyless x402 transport ─────────────────────────────────────────────
+
+    def _signer(self):
+        if self._account is not None:
+            return self._account
+        try:
+            from eth_account import Account  # type: ignore
+        except ImportError as exc:  # pragma: no cover - depends on the extra
+            raise RobinhoodError(
+                "Keyless x402 mode needs the optional extra: pip install 'robinhood-chain[x402]' (eth-account)"
+            ) from exc
+        self._account = Account.from_key(self._private_key)
+        return self._account
+
+    def _payment_header(self, leg: Dict[str, Any]) -> str:
+        """Sign an EIP-3009 transferWithAuthorization for the USDG-on-RHC leg."""
+        from eth_account.messages import encode_typed_data  # type: ignore
+
+        account = self._signer()
+        now = int(time.time())
+        nonce = "0x" + secrets.token_hex(32)
+        to = leg["payTo"]
+        message = {
+            "from": account.address,
+            "to": to,
+            "value": int(leg["amount"]),
+            "validAfter": 0,
+            "validBefore": now + _AUTH_TTL_SECONDS,
+            "nonce": bytes.fromhex(nonce[2:]),
+        }
+        signable = encode_typed_data(
+            domain_data=_USDG_DOMAIN,
+            message_types=_TRANSFER_WITH_AUTHORIZATION_TYPES,
+            message_data=message,
+        )
+        signature = account.sign_message(signable).signature.hex()
+        if not signature.startswith("0x"):
+            signature = "0x" + signature
+        payload = {
+            "x402Version": 2,
+            "scheme": "exact",
+            "network": _RHC_NETWORK,
+            "payload": {
+                "signature": signature,
+                "authorization": {
+                    "from": account.address,
+                    "to": to,
+                    "value": str(leg["amount"]),
+                    "validAfter": "0",
+                    "validBefore": str(now + _AUTH_TTL_SECONDS),
+                    "nonce": nonce,
+                },
+            },
+        }
+        return base64.b64encode(json.dumps(payload).encode()).decode()
+
+    def _capture_payment(self, resp: httpx.Response) -> None:
+        raw = resp.headers.get("payment-response")
+        if not raw:
+            return
+        try:
+            self.last_payment = json.loads(base64.b64decode(raw).decode())
+        except Exception:  # noqa: BLE001
+            self.last_payment = None
+
+    def _get_x402(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Keyless GET: 402 challenge → sign USDG leg → retry with PAYMENT-SIGNATURE."""
+        if _keyless_template(path) not in _KEYLESS_SET:
+            raise KeylessNotAvailableError(path)
+        url = f"{self.x402_base_url}{path}"
+        clean = self._clean(params)
+        first = httpx.get(url, params=clean, headers=self._headers, timeout=self.timeout)
+        if first.status_code != 402:
+            self._capture_rate_limit(first)
+            self._raise_for_status(first)
+            return first.json()
+        try:
+            challenge = first.json()
+        except Exception:  # noqa: BLE001
+            challenge = {}
+        leg = next((a for a in challenge.get("accepts", []) if a.get("network") == _RHC_NETWORK), None)
+        if leg is None:
+            raise RobinhoodError(f"x402 challenge for {path} has no USDG-on-Robinhood-Chain leg")
+        headers = dict(self._headers)
+        headers["PAYMENT-SIGNATURE"] = self._payment_header(leg)
+        resp = httpx.get(url, params=clean, headers=headers, timeout=self.timeout)
+        self._capture_payment(resp)
+        self._capture_rate_limit(resp)
+        if not resp.is_success:
+            raise RobinhoodError(
+                f"x402 payment for {path} rejected (HTTP {resp.status_code}): {resp.text[:400]}"
+            )
+        return resp.json()
+
+    async def _aget_x402(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        if _keyless_template(path) not in _KEYLESS_SET:
+            raise KeylessNotAvailableError(path)
+        url = f"{self.x402_base_url}{path}"
+        clean = self._clean(params)
+        async with httpx.AsyncClient(timeout=self.timeout) as http:
+            first = await http.get(url, params=clean, headers=self._headers)
+            if first.status_code != 402:
+                self._capture_rate_limit(first)
+                self._raise_for_status(first)
+                return first.json()
+            try:
+                challenge = first.json()
+            except Exception:  # noqa: BLE001
+                challenge = {}
+            leg = next((a for a in challenge.get("accepts", []) if a.get("network") == _RHC_NETWORK), None)
+            if leg is None:
+                raise RobinhoodError(f"x402 challenge for {path} has no USDG-on-Robinhood-Chain leg")
+            headers = dict(self._headers)
+            headers["PAYMENT-SIGNATURE"] = self._payment_header(leg)
+            resp = await http.get(url, params=clean, headers=headers)
+            self._capture_payment(resp)
+            self._capture_rate_limit(resp)
+            if not resp.is_success:
+                raise RobinhoodError(
+                    f"x402 payment for {path} rejected (HTTP {resp.status_code}): {resp.text[:400]}"
+                )
+            return resp.json()
+
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Synchronous GET with retry on transient failures."""
+        if self.auth_mode == "x402":
+            return self._get_x402(path, params)
         url = f"{self.base_url}{path}"
         clean = self._clean(params)
         attempt = 0
@@ -209,6 +420,8 @@ class RobinhoodClient:
 
     async def _aget(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Asynchronous GET with retry on transient failures."""
+        if self.auth_mode == "x402":
+            return await self._aget_x402(path, params)
         url = f"{self.base_url}{path}"
         clean = self._clean(params)
         attempt = 0
@@ -237,6 +450,8 @@ class RobinhoodClient:
 
     def _post(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
         """Synchronous POST (JSON body) with retry on transient failures."""
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
         attempt = 0
         while True:
@@ -262,6 +477,8 @@ class RobinhoodClient:
         self, path: str, json_body: Optional[Dict[str, Any]] = None
     ) -> Any:
         """Asynchronous POST (JSON body) with retry on transient failures."""
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
         attempt = 0
         async with httpx.AsyncClient(timeout=self.timeout) as http:
@@ -289,6 +506,8 @@ class RobinhoodClient:
 
     def _patch(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
         """Synchronous PATCH (JSON body) with retry on transient failures."""
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
         attempt = 0
         while True:
@@ -314,6 +533,8 @@ class RobinhoodClient:
         self, path: str, json_body: Optional[Dict[str, Any]] = None
     ) -> Any:
         """Asynchronous PATCH (JSON body) with retry on transient failures."""
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
         attempt = 0
         async with httpx.AsyncClient(timeout=self.timeout) as http:
@@ -346,6 +567,8 @@ class RobinhoodClient:
         ``user_id`` and returns 404 once the row is gone, so a retried delete
         can never remove someone else's rule.
         """
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
         attempt = 0
         while True:
@@ -367,6 +590,8 @@ class RobinhoodClient:
 
     async def _adelete(self, path: str) -> Any:
         """Asynchronous DELETE (no body) with retry on transient failures."""
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
         attempt = 0
         async with httpx.AsyncClient(timeout=self.timeout) as http:

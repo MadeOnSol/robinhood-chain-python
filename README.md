@@ -15,6 +15,8 @@ Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra co
 
 > **New in 0.6.0 — wallet intelligence.** Ten new operations covering the Robinhood Chain wallet surface, which had no SDK binding at all until now: `wallet()`, `wallet_pnl()`, `wallet_positions()`, `wallet_trades()`, plus the watchlist — `wallet_tracker_list()`, `wallet_tracker_add()`, `wallet_tracker_remove()`, `wallet_tracker_relabel()`, `wallet_tracker_trades()` and `wallet_tracker_summary()`. Everything is **ETH**-denominated, and cost basis is FIFO over a rolling 90-day window — `cost_basis_observable_from` names the date the window opens, so a position opened before it reads as a sell with no matching buy. The profile / PnL / positions trio shares ONE snapshot cache server-side, so calling all three on an address costs roughly one computation rather than three; `cache_hit` says which call paid for it. Watchlist quotas are **per chain** (PRO 50 / ULTRA 100 / BUSINESS 500 RHC wallets), independent of your Solana list.
 
+> **New in 0.7.0 — keyless x402 mode.** `RobinhoodClient(private_key="0x…")`: any EVM wallet holding **USDG on Robinhood Chain** can call the 10 keyless endpoints (`kol_feed`, `kol_hot_tokens`, `kol_leaderboard`, `token`, `token_buyer_quality`, `token_kol_consensus`, `token_risk`, `token_holders`, `wallet_pnl`, `deployer_alerts`) with no API key — the client handles the 402 → sign EIP-3009 `transferWithAuthorization` (EIP-712 domain `{Global Dollar, 1, 4663}`) → retry flow, one payment per call, from $0.04. The wallet needs USDG but no ETH (our facilitator relays gas). `client.last_payment` carries the on-chain settlement (`transaction`, `payer`). Needs the extra `pip install "robinhood-chain[x402]"` (eth-account). Any other method on a keyless client raises `KeylessNotAvailableError` — it names the rail, it never silently downgrades. Sync + async both supported.
+
 > **New in 0.5.0 — real-time WebSocket streaming.** A managed stream client (`client.stream()`) over `wss://madeonsol.com/ws/v1/stream` with auto-reconnect, 24h-token refresh and typed callbacks, covering all six RHC channels — the KOL tape, the full DEX firehose, and the four rule-engine push channels. Channel names are the **canonical** server registry (`rhc:dex_trades`, not the `rhc:trades` spelling some 0.4.0 SDKs used — the server still accepts that as a deprecated alias). Needs the `stream` extra: `pip install "robinhood-chain[stream]"`. See [Real-time streaming](#real-time-streaming-new-in-050).
 
 ## Quick start (10 seconds)
@@ -38,7 +40,17 @@ for t in feed["trades"]:
 
 ## Authentication
 
-Bearer `msk_` API key — the same key and base URL as the Solana MadeOnSol API. This package also serves the **x402-Py key-mode** surface: Bearer auth only. Robinhood Chain does have a keyless x402 pay-per-call rail (a narrow 6-endpoint subset — see [madeonsol.com/robinhood/x402](https://madeonsol.com/robinhood/x402)), but its signing path is not ported to this SDK.
+Two modes. **Key mode** — Bearer `msk_` API key, the same key and base URL as the Solana MadeOnSol API, all 52 operations. **Keyless x402 mode** (0.7.0) — `private_key=` of an EVM wallet holding USDG on Robinhood Chain pays per call on the 10-endpoint rail documented at [madeonsol.com/robinhood/x402](https://madeonsol.com/robinhood/x402); needs `pip install "robinhood-chain[x402]"`.
+
+```python
+import os
+from robinhood_chain import RobinhoodClient
+
+# Keyless: USDG wallet on chain 4663, no signup. Read the key from the environment.
+agent = RobinhoodClient(private_key=os.environ["RHC_PAYER_KEY"])
+risk = agent.token_risk("0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec")   # NVDA, $0.02
+print(risk["score"], agent.last_payment["transaction"])              # settlement tx on Robinhood Chain
+```
 
 ```python
 import os
