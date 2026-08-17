@@ -165,6 +165,64 @@ class TradesResponse(TypedDict, total=False):
     next_before: Optional[str]
 
 
+# ── /rhc/lp-events ──
+
+
+class LpEvent(TypedDict, total=False):
+    """One liquidity REMOVAL from ``GET /rhc/lp-events``.
+
+    Every row is ``event == "remove"`` — adds are not persisted. Amounts are
+    raw on-chain uint256 integers as decimal **strings**; v4 rows carry
+    ``liquidity`` only (the pool manager emits no token amounts), so
+    ``amount0`` / ``amount1`` / ``token_amount_raw`` are ``None`` there.
+    """
+
+    event: str  # always "remove"
+    pool: str
+    dex: str  # uniswap-v2 | uniswap-v3 | uniswap-v4
+    fee_tier: Optional[int]
+    token_address: str
+    token_symbol: Optional[str]
+    token_name: Optional[str]
+    token_decimals: Optional[int]
+    launchpad: Optional[str]
+    provider: Optional[str]  # wallet that removed liquidity
+    provider_is_token_deployer: bool  # the classic rug shape
+    provider_deployer_tier: Optional[str]
+    provider_kol_name: Optional[str]
+    liquidity: Optional[str]  # raw liquidity units removed (v3/v4), uint256 as str
+    amount0: Optional[str]  # raw token0 amount (v2/v3 only), uint256 as str
+    amount1: Optional[str]  # raw token1 amount (v2/v3 only), uint256 as str
+    token0: Optional[str]
+    token1: Optional[str]
+    token_amount_raw: Optional[str]  # amount0 or amount1, whichever is the token side
+    quote_token: Optional[str]
+    quote_amount_raw: Optional[str]
+    block_number: int
+    block_time: str  # exact block header timestamp (ISO 8601)
+    tx_hash: str
+    log_index: int
+
+
+class LpEventsCoverage(TypedDict, total=False):
+    """Honesty block on ``LpEventsResponse``: ``events == ["remove"]``,
+    ``adds_persisted == False``."""
+
+    events: List[str]
+    adds_persisted: bool
+    note: str
+    since: str
+
+
+class LpEventsResponse(TypedDict, total=False):
+    chain: str
+    events: List[LpEvent]
+    count: int
+    has_more: bool
+    next_before: Optional[str]  # opaque cursor — pass back as before=
+    coverage: LpEventsCoverage
+
+
 # ── /rhc/tokens ──
 
 
@@ -193,6 +251,62 @@ class TokensResponse(TypedDict, total=False):
     tokens: List[TokenRow]
     count: int
     sort: str
+
+
+# ── /rhc/equities ──
+
+
+class Equity(TypedDict, total=False):
+    """One official Robinhood tokenized equity (stock or ETF).
+
+    Identity is the issuer BEACON, never the name: a token is listed only if
+    its contract is an EIP-1967 beacon proxy on Robinhood's issuer beacon
+    (``issuer_beacon``), so the fake "GameStop • Robinhood Token" contracts
+    never appear here.
+    """
+
+    token_address: str
+    symbol: Optional[str]
+    name: Optional[str]  # underlying name, "• Robinhood Token" suffix stripped (display only)
+    onchain_name: Optional[str]
+    asset_class: str  # "equity"
+    verified: bool  # always True here — beacon-verified by construction
+    issuer_beacon: Optional[str]
+    decimals: Optional[int]
+    listed_at: Optional[str]
+    price_usd: Optional[float]
+    price_native: Optional[float]
+    market_cap_usd: Optional[float]
+    fdv_usd: Optional[float]
+    peak_mc_usd: Optional[float]
+    liquidity_usd: Optional[float]
+    liquidity_basis: Optional[str]
+    primary_dex: Optional[str]
+    primary_pool: Optional[str]
+    last_trade_time: Optional[str]
+    trades_24h: int
+    volume_eth_24h: float
+    buys_24h: int
+    sells_24h: int
+    buyers_24h: int
+    sellers_24h: int
+
+
+class EquitiesIdentity(TypedDict, total=False):
+    method: str  # "beacon"
+    issuer_beacon: str
+    note: str
+
+
+class EquitiesResponse(TypedDict, total=False):
+    chain: str
+    equities: List[Equity]
+    count: int
+    total_equities: int
+    sort: str
+    identity: EquitiesIdentity
+    stats_window: str  # "24h"
+    stats_as_of: str
 
 
 # ── /rhc/tokens/{address} ──

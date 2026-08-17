@@ -13,6 +13,8 @@ Live KOL trades and consensus clustering, token discovery, launch-bundle detecti
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card. Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
+> **New in 0.9.0 — tokenized equities + the rug signal.** Two endpoints that were live on the API but had no Python binding: `client.equities(sort=, limit=, symbol=, q=)` → `GET /rhc/equities` (**BASIC**, `EquitiesResponse` / `Equity` TypedDicts) lists every official Robinhood tokenized stock/ETF (NVDA, SPY, AAPL, …) with live price / MC / liquidity and 24h trades / ETH volume / buyer-seller split. **Identity is the issuer BEACON, never the name** — a token is listed only if its contract is an EIP-1967 beacon proxy on Robinhood's issuer beacon, read from our own node; on ship day there were 20 fake "GameStop • Robinhood Token" contracts and 8 fake NVDAs with the exact official suffix, and none appear here. `client.lp_events(limit=, token=, pool=, provider=, dex=, before=)` → `GET /rhc/lp-events` (**PRO+**, `LpEventsResponse` / `LpEvent`) is the liquidity **removals** feed — Uniswap v2/v3 `Burn` + v4 `ModifyLiquidity` with a negative delta on tracked pools, each row enriched with the token, the provider wallet, `provider_is_token_deployer` (the classic rug tell) and `provider_kol_name`. Removals ONLY: adds are not persisted, so an empty page means "no removals seen", never "no liquidity activity" — the `coverage` block says `adds_persisted: False`. Amounts are raw uint256 strings; v4 rows carry `liquidity` only. Cursor via `next_before`; the path alias `/rhc/tokens/{address}/lp-events` is the same feed with `token=` pinned. Data since 2026-08-05. Both are key-mode only (not on the keyless x402 rail).
+
 > **New in 0.8.0 — `holder_growth`: who arrived and who left.** `client.token_holders(address)` (`HolderGrowth` / `HolderGrowthWindow` TypedDicts) now returns `holder_growth` on `GET /rhc/tokens/{address}/holders`: `{ "1h", "24h", "7d" }` × `{ cutoff_block, entered, entered_still_holding, exited, net }`. *entered* = addresses whose first `Transfer` of the token landed at-or-after the window's cutoff block (any current balance); *entered_still_holding* = those still non-zero; *exited* = pre-existing holders whose last movement in the window left them at zero; *net* ≈ the change in `holder_count`. Pools and burn addresses are excluded from every count. This exists because RHC balances are folded from ERC-20 Transfer logs on our own node — the fold keeps first-seen and last-moved blocks per address and retains zero-balance rows — so it is a direct read, not an estimate; the Solana census is a point-in-time ledger scan with no history and cannot answer this. A window is `null` (never 0) only when the chain had no ingested trades in it; the whole block is `null` only if the growth read failed. Sanity check from ship day: a token launched that morning showed 593 entered / 560 still holding over 24h, and `holder_count` was exactly 560.
 
 > **New in 0.6.0 — wallet intelligence.** Ten new operations covering the Robinhood Chain wallet surface, which had no SDK binding at all until now: `wallet()`, `wallet_pnl()`, `wallet_positions()`, `wallet_trades()`, plus the watchlist — `wallet_tracker_list()`, `wallet_tracker_add()`, `wallet_tracker_remove()`, `wallet_tracker_relabel()`, `wallet_tracker_trades()` and `wallet_tracker_summary()`. Everything is **ETH**-denominated, and cost basis is FIFO over a rolling 90-day window — `cost_basis_observable_from` names the date the window opens, so a position opened before it reads as a sell with no matching buy. The profile / PnL / positions trio shares ONE snapshot cache server-side, so calling all three on an address costs roughly one computation rather than three; `cache_hit` says which call paid for it. Watchlist quotas are **per chain** (PRO 50 / ULTRA 100 / BUSINESS 500 RHC wallets), independent of your Solana list.
@@ -42,7 +44,7 @@ for t in feed["trades"]:
 
 ## Authentication
 
-Two modes. **Key mode** — Bearer `msk_` API key, the same key and base URL as the Solana MadeOnSol API, all 52 operations. **Keyless x402 mode** (0.7.0) — `private_key=` of an EVM wallet holding USDG on Robinhood Chain pays per call on the 10-endpoint rail documented at [madeonsol.com/robinhood/x402](https://madeonsol.com/robinhood/x402); needs `pip install "robinhood-chain[x402]"`.
+Two modes. **Key mode** — Bearer `msk_` API key, the same key and base URL as the Solana MadeOnSol API, all 54 operations. **Keyless x402 mode** (0.7.0) — `private_key=` of an EVM wallet holding USDG on Robinhood Chain pays per call on the 10-endpoint rail documented at [madeonsol.com/robinhood/x402](https://madeonsol.com/robinhood/x402); needs `pip install "robinhood-chain[x402]"`.
 
 ```python
 import os
@@ -61,7 +63,7 @@ from robinhood_chain import RobinhoodClient
 client = RobinhoodClient(api_key=os.environ["MADEONSOL_API_KEY"])
 ```
 
-## Endpoints — the 52 Robinhood Chain operations
+## Endpoints — the 54 Robinhood Chain operations
 
 Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 hex). Everything is a GET except the two batch POSTs and the four rule engines, which are full CRUD.
 
@@ -81,7 +83,9 @@ Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 he
 | Method | Route | Tier |
 |---|---|---|
 | `client.trades(limit=, token=, dex=, action=, min_eth=, before=)` | `GET /api/v1/rhc/trades` | PRO+ |
+| `client.lp_events(limit=, token=, pool=, provider=, dex=, before=)` — liquidity **removals** only (v2/v3 `Burn` + v4 negative `ModifyLiquidity`; `coverage["adds_persisted"]` is `False`), raw uint256 string amounts, `provider_is_token_deployer` = rug tell | `GET /api/v1/rhc/lp-events` | PRO+ |
 | `client.tokens(limit=, sort=, min_mc_usd=, min_liquidity_usd=, launchpad=)` | `GET /api/v1/rhc/tokens` | PRO+ |
+| `client.equities(sort=, limit=, symbol=, q=)` — every official Robinhood tokenized stock/ETF; identity = issuer **beacon**, never the name; live price / MC / liquidity + 24h trades / ETH volume / buyers vs sellers; `sort` volume\|trades\|market_cap\|last_trade\|symbol, `limit` ≤ 300 | `GET /api/v1/rhc/equities` | BASIC |
 | `client.token(address)` | `GET /api/v1/rhc/tokens/{address}` | BASIC |
 | `client.token_batch(addresses)` — max **50** | `POST /api/v1/rhc/token/batch` | BASIC |
 | `client.token_candles(address, limit=, from_=, to=)` | `GET /api/v1/rhc/tokens/{address}/candles` | PRO+ |
@@ -295,6 +299,25 @@ for s in tape["trades"]:
 candles = client.token_candles(addr, limit=240)
 for k in candles["candles"]:
     print(k["bucket_start"], k["close_price_usd"], k["volume_usd"])
+```
+
+### Tokenized equities & liquidity removals
+
+```python
+# Every beacon-verified Robinhood stock/ETF token, ranked by 24h ETH volume —
+# identity is the issuer beacon, never the name, so the fake NVDA/GameStop contracts never show up
+eq = client.equities(sort="volume", limit=20)
+print(eq["identity"]["method"], eq["total_equities"])
+for e in eq["equities"]:
+    print(e["symbol"], e["name"], e["price_usd"], "MC", e["market_cap_usd"], e["trades_24h"], "trades", e["volume_eth_24h"], "ETH")
+nvda = client.equities(symbol="NVDA")  # exact ticker, case-insensitive
+
+# Rug watch — liquidity REMOVALS for one token (PRO+). Adds are never persisted:
+# coverage["adds_persisted"] is False, so an empty page means "no removals seen".
+lp = client.lp_events(token=addr, limit=50)
+for ev in lp["events"]:
+    if ev["provider_is_token_deployer"]:
+        print("deployer pulled LP:", ev["tx_hash"], ev["dex"], ev["token_amount_raw"])  # raw uint256 string
 ```
 
 ### Deployer reputation & smart money

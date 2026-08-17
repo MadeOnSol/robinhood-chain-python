@@ -1,6 +1,6 @@
 """Robinhood Chain API client (EVM-native, chain id 4663).
 
-``RobinhoodClient`` is a thin, typed wrapper over the 52 operations (38 GET,
+``RobinhoodClient`` is a thin, typed wrapper over the 54 operations (40 GET,
 6 POST, 4 PATCH, 4 DELETE) under
 ``https://madeonsol.com/api/v1/rhc/*``, plus the shared WebSocket streaming
 surface (``POST /stream/token`` and the managed :meth:`RobinhoodClient.stream`
@@ -860,6 +860,58 @@ class RobinhoodClient:
             },
         )
 
+    def lp_events(
+        self,
+        *,
+        limit: int = 50,
+        token: Optional[str] = None,
+        pool: Optional[str] = None,
+        provider: Optional[str] = None,
+        dex: Optional[str] = None,
+        before: Optional[str] = None,
+    ) -> t.LpEventsResponse:
+        """Liquidity REMOVALS feed — the rug signal (PRO+).
+
+        Uniswap v2/v3 ``Burn`` and v4 ``ModifyLiquidity`` with a negative
+        delta on tracked pools, from our own node's log subscription. Each row
+        is enriched with the token, the wallet that pulled (``provider``),
+        ``provider_is_token_deployer`` (the classic rug shape), deployer tier
+        and KOL name.
+
+        **Removals only** — adds are not persisted (v4 adds share the topic and
+        are dropped at decode; v2/v3 ``Mint`` is not subscribed), so every row
+        is ``event == "remove"`` and an empty page means "no removals seen",
+        never "no liquidity activity" — the ``coverage`` block says
+        ``adds_persisted: False``. Amounts are raw uint256 integers as decimal
+        **strings** (``liquidity``, ``amount0`` / ``amount1``, pre-resolved
+        ``token_amount_raw`` / ``quote_token`` / ``quote_amount_raw``); v4 rows
+        carry ``liquidity`` only. Data since 2026-08-05.
+
+        Args:
+            limit: Max events (1–200, default 50).
+            token: Filter to one token address (``0x`` + 40 hex).
+            pool: Pool address (v2/v3) or bytes32 poolId (v4).
+            provider: Filter to one liquidity provider (``0x`` + 40 hex).
+            dex: ``'uniswap-v2'`` | ``'uniswap-v3'`` | ``'uniswap-v4'``.
+            before: Opaque cursor — pass ``next_before`` from the previous
+                response (same (block_time, id) keyset as :meth:`trades`).
+
+        Route: ``GET /api/v1/rhc/lp-events``. Tier: PRO+. Alias
+        ``GET /rhc/tokens/{address}/lp-events`` is the same feed with
+        ``token`` pinned — use ``lp_events(token=address)``.
+        """
+        return self._get(
+            "/rhc/lp-events",
+            {
+                "limit": limit,
+                "token": token,
+                "pool": pool,
+                "provider": provider,
+                "dex": dex,
+                "before": before,
+            },
+        )
+
     # ── Tokens: list / detail / candles / consensus / quality / bundle ─────
 
     def tokens(
@@ -896,6 +948,40 @@ class RobinhoodClient:
                 "min_liquidity_usd": min_liquidity_usd,
                 "launchpad": launchpad,
             },
+        )
+
+    def equities(
+        self,
+        *,
+        sort: Optional[str] = None,
+        limit: int = 100,
+        symbol: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> t.EquitiesResponse:
+        """Tokenized stocks & ETFs on Robinhood Chain (BASIC+).
+
+        Every official Robinhood tokenized equity (NVDA, SPY, AAPL, …) with
+        live price / MC / liquidity and 24h trades / ETH volume / buyer-seller
+        split. **Identity is the issuer BEACON, never the name**: a token is
+        listed only if its contract is an EIP-1967 beacon proxy on Robinhood's
+        issuer beacon, read from our own node — the 20 fake "GameStop •
+        Robinhood Token" contracts and 8 fake NVDAs never appear here.
+        ``verified`` is ``True`` by construction; ``name`` has the "• Robinhood
+        Token" suffix stripped, ``onchain_name`` is the raw ERC-20 name. 24h
+        stats are cached 60 s (``stats_as_of``).
+
+        Args:
+            sort: ``'volume'`` (default, 24h ETH volume) | ``'trades'`` |
+                ``'market_cap'`` | ``'last_trade'`` | ``'symbol'``.
+            limit: Max equities (1–300, default 100).
+            symbol: Exact ticker, case-insensitive (``'NVDA'``).
+            q: Substring of symbol or name.
+
+        Route: ``GET /api/v1/rhc/equities``. Tier: BASIC.
+        """
+        return self._get(
+            "/rhc/equities",
+            {"sort": sort, "limit": limit, "symbol": symbol, "q": q},
         )
 
     def token(self, address: str) -> t.TokenDetail:
@@ -2474,7 +2560,7 @@ class RobinhoodClient:
 class AsyncRobinhoodClient:
     """Async wrapper around :class:`RobinhoodClient`.
 
-    Each endpoint method (the 52 RHC operations plus ``stream_token``) is
+    Each endpoint method (the 54 RHC operations plus ``stream_token``) is
     exposed as a coroutine with the same signature as its sync twin. The endpoint methods build their (path, params
     or JSON body) on the shared sync instance and dispatch through the async
     transport, so the two paths can never drift.
@@ -2514,7 +2600,9 @@ _GET_ENDPOINTS = frozenset(
         "kol_first_touches",
         "kol_wallet",
         "trades",
+        "lp_events",
         "tokens",
+        "equities",
         "token",
         "token_candles",
         "token_kol_consensus",
