@@ -1110,6 +1110,18 @@ class RobinhoodClient:
         **string**; do not coerce it to a float. Holder addresses may be
         ERC-4337 smart accounts, so ``holder_count`` is not a headcount of people.
 
+        ``holder_growth`` (:class:`~robinhood_chain.types.HolderGrowth`, keys
+        ``"1h"`` / ``"24h"`` / ``"7d"`` + ``note``) reports per window:
+        ``entered`` (addresses whose first ``Transfer`` of the token landed
+        at-or-after ``cutoff_block``, any current balance),
+        ``entered_still_holding`` (those still non-zero), ``exited``
+        (pre-existing holders whose last ``Transfer`` in the window left them at
+        zero) and ``net = entered_still_holding - exited`` ≈ Δ ``holder_count``.
+        Pools and burns are excluded. A window is ``None`` only when the chain
+        had no ingested trades in it; the whole object is ``None`` only if the
+        growth read failed. Possible because the fold retains history — the
+        Solana census cannot answer this.
+
         Args:
             address: Token address (``0x`` + 40 hex).
             limit: Rows to return. Capped at 50 on PRO, 200 on ULTRA/BUSINESS.

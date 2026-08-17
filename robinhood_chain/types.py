@@ -371,6 +371,44 @@ class BundleResponse(TypedDict, total=False):
     wallets: List[BundleWallet]
 
 
+# ── /rhc/tokens/{address}/holders ──
+
+
+class HolderGrowthWindow(TypedDict, total=False):
+    """One holder-growth window (``1h`` / ``24h`` / ``7d``) on ``holder_growth``.
+
+    Every count is ``None`` when the window could not be resolved (the chain had
+    no ingested trades in it). Pools and burn addresses are excluded from all
+    counts.
+    """
+
+    cutoff_block: Optional[int]  # lowest block at-or-after now()-window (~10 blocks/s)
+    entered: Optional[int]  # first Transfer of this token at-or-after cutoff_block (any balance)
+    entered_still_holding: Optional[int]  # entered ∩ balance > 0
+    exited: Optional[int]  # pre-existing holders whose last Transfer in the window left them at 0
+    net: Optional[int]  # entered_still_holding − exited ≈ Δ holder_count
+
+
+# Keys "1h" / "24h" / "7d" are not identifiers, so this one uses the functional form.
+HolderGrowth = TypedDict(
+    "HolderGrowth",
+    {
+        "1h": Optional[HolderGrowthWindow],
+        "24h": Optional[HolderGrowthWindow],
+        "7d": Optional[HolderGrowthWindow],
+        "note": str,
+    },
+    total=False,
+)
+"""The ``holder_growth`` object on ``GET /rhc/tokens/{address}/holders``.
+
+Entered / exited holders per window, read from the ``Transfer``-log fold
+(``first_seen_block`` + ``last_block``, zero-balance rows retained). The whole
+object is ``None`` only if the growth read failed; a single window is ``None``
+when the chain had no ingested trades in it. Access as ``growth["24h"]``.
+"""
+
+
 # ── /rhc/deployer-hunter/leaderboard ──
 
 
