@@ -1,9 +1,12 @@
 """Real-time WebSocket streaming client for Robinhood Chain channels.
 
 Wraps the connect -> token -> subscribe -> event loop with auto-reconnect,
-24h-token auto-refresh, heartbeat liveness (via websockets ping/pong), and
-typed callbacks, so consumers never hand-roll connection management. Obtain one
-via ``client.stream()``.
+heartbeat liveness (via websockets ping/pong), and typed callbacks, so
+consumers never hand-roll connection management. Obtain one via
+``client.stream()``. The stream token is fetched on every (re)connect; stream
+tokens never expire (since 2026-08-27), so there is no refresh timer — a 4001
+close means the token was rotated or the subscription lapsed, and the
+reconnect simply mints again.
 
 All six channels ride the main MadeOnSol stream endpoint
 (``wss://madeonsol.com/ws/v1/stream``) — unlike Solana, the RHC DEX firehose

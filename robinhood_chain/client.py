@@ -2490,33 +2490,44 @@ class RobinhoodClient:
 
     # ── Streaming ──────────────────────────────────────────────────────────
 
-    def stream_token(self) -> Dict[str, Any]:
-        """Issue a 24h WebSocket streaming token (PRO+).
+    def stream_token(self, rotate: bool = False) -> Dict[str, Any]:
+        """Get your WebSocket streaming token (PRO+).
 
-        Returns ``token``, ``expires_at``, ``next_refresh_at`` (rotate ~1h
-        before expiry), ``ws_url`` (``wss://madeonsol.com/ws/v1/stream`` — the
+        The token does not expire (since 2026-08-27): the same value is
+        returned on every call and nothing needs refreshing; it only stops
+        working if the subscription lapses or you rotate it explicitly.
+        Returns ``token``, ``expires_at`` / ``next_refresh_at`` (always
+        ``None``, kept for wire compatibility), ``rotated`` (``True`` only
+        when this call replaced the previous token), ``lifetime`` (a
+        human-readable statement), ``ws_url`` (``wss://madeonsol.com/ws/v1/stream`` — the
         endpoint ALL six RHC channels ride; unlike Solana there is no separate
         RHC firehose endpoint), the full ``channels`` list the server accepts,
         a ``subscribe_example``, a human-readable ``usage`` string, and — on
         ULTRA/BUSINESS only — ``dex_ws_url``, the separate *Solana* DEX
         firehose endpoint (not used for RHC).
 
-        Idempotent-ish: while your current token still has >6h of life (and
-        your tier is unchanged) the same token is returned, so multi-process
-        clients minting at boot do not invalidate each other. On rotation the
-        previous token stays valid for a 60s grace window.
+        Pass ``rotate=True`` to replace the current token (sends
+        ``{"rotate": true}``); the previous token stays valid for a 60s grace
+        window. The server never rotates on its own and never sends a
+        ``token_refresh`` frame unless you rotated, so multi-process clients
+        minting at boot never invalidate each other. A ``4001`` close means
+        "mint again" (lapsed or rotated), never a timer. Authenticate the
+        handshake with ``Authorization: Bearer <token>`` (``?token=`` still
+        works and is masked in access logs); RHC channels ride the same socket
+        and token as Solana.
 
         Prefer :meth:`stream` unless you are hand-rolling the WebSocket.
 
         Route: ``POST /api/v1/stream/token``. Tier: PRO+.
         """
-        return self._post("/stream/token")
+        return self._post("/stream/token", {"rotate": True} if rotate else None)
 
     def stream(
         self, *, auto_reconnect: bool = True, max_backoff: float = 30.0
     ) -> "RobinhoodStream":
-        """Open a managed real-time WebSocket stream — auto-reconnect, 24h-token
-        refresh, and typed callbacks. Requires the optional ``websockets``
+        """Open a managed real-time WebSocket stream — auto-reconnect (the
+        never-expiring stream token is fetched on every (re)connect; there is
+        no refresh timer) and typed callbacks. Requires the optional ``websockets``
         extra::
 
             pip install "robinhood-chain[stream]"
