@@ -11,7 +11,7 @@ All addresses are lowercase ``0x`` EVM strings. Amounts are ETH-denominated
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:  # TypedDict is in typing from 3.8, but Optional-key semantics are cleanest here
     from typing import TypedDict
@@ -1466,3 +1466,121 @@ class WalletTrackerSummaryResponse(TypedDict, total=False):
 
 # Loose alias for callers who just want the raw dict.
 JSON = Any
+
+# ── /rhc/tokens/locks · /rhc/tokens/{address}/locks · /rhc/tokens/unlocks (2026-09-15) ──
+
+
+class RhcLockNextUnlock(TypedDict, total=False):
+    at: str
+    kind: str  # cliff | final | tranche
+    amount_raw: str
+    amount: Optional[float]
+    amount_usd: Optional[float]
+
+
+class RhcTokenLock(TypedDict, total=False):
+    """One lock / vesting contract. Raw amounts are decimal strings; ui / usd /
+    pct are None when decimals or price are unknown. ``withdrawn_*`` is always
+    None — withdrawals are not tracked on RHC (create-only tape)."""
+
+    lock_id: str
+    locker: str
+    locker_name: Optional[str]
+    family: str
+    family_name: str
+    locker_lock_id: Optional[str]
+    kind: str  # lock | vesting
+    subject: str  # token | lp
+    status: str  # active | completed
+    token_address: str
+    lp: Optional[Dict[str, Any]]
+    sender: str
+    recipient: Optional[str]
+    tx_sender: Optional[str]
+    name: Optional[str]
+    amount_raw: Optional[str]
+    amount: Optional[float]
+    amount_usd: Optional[float]
+    amount_pct_of_supply: Optional[float]
+    amount_unit: Optional[str]
+    locked_raw: Optional[str]
+    locked: Optional[float]
+    locked_usd: Optional[float]
+    locked_pct_of_supply: Optional[float]
+    unlocked_raw: Optional[str]
+    unlocked: Optional[float]
+    withdrawn_raw: None
+    withdrawn: None
+    start_at: Optional[str]
+    cliff_at: Optional[str]
+    end_at: Optional[str]
+    cliff_amount_raw: Optional[str]
+    cliff_amount: Optional[float]
+    continuous: bool
+    perpetual: bool
+    schedule: Optional[List[Dict[str, Any]]]
+    next_unlock: Optional[RhcLockNextUnlock]
+    cancelable: Optional[bool]
+    cancelable_by_sender: Optional[bool]
+    transferable: Optional[bool]
+    created_at: str
+    created_at_estimated: bool
+    block_number: int
+    block_time: str
+    tx_hash: str
+    log_index: int
+    layout_verified: bool
+    token: Dict[str, Any]
+
+
+class RhcLockCoverage(TypedDict, total=False):
+    families: List[str]
+    withdrawals_tracked: bool
+    cancels_tracked: bool
+    lp_locks: str
+    note: str
+
+
+class TokenLocksResponse(TypedDict, total=False):
+    chain: str
+    locks: List[RhcTokenLock]
+    pagination: Dict[str, Any]
+    stream: Dict[str, Any]
+    coverage: RhcLockCoverage
+    meta: Dict[str, Any]
+
+
+class TokenLockSummaryResponse(TypedDict, total=False):
+    chain: str
+    token_address: str
+    token: Dict[str, Any]
+    summary: Dict[str, Any]
+    locks: List[RhcTokenLock]
+    coverage: RhcLockCoverage
+    meta: Dict[str, Any]
+
+
+class RhcTokenUnlock(TypedDict, total=False):
+    unlock_at: str
+    in_seconds: int
+    event: str  # cliff | final | tranche
+    amount_raw: str
+    amount: Optional[float]
+    amount_usd: Optional[float]
+    amount_pct_of_supply: Optional[float]
+    window_amount_raw: str
+    window_amount: Optional[float]
+    window_amount_usd: Optional[float]
+    window_amount_pct_of_supply: Optional[float]
+    token_address: str
+    token: Dict[str, Any]
+    lock: Dict[str, Any]
+
+
+class TokenUnlocksResponse(TypedDict, total=False):
+    chain: str
+    window: Dict[str, str]
+    unlocks: List[RhcTokenUnlock]
+    pagination: Dict[str, Any]
+    coverage: RhcLockCoverage
+    meta: Dict[str, Any]

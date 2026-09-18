@@ -140,7 +140,10 @@ class RobinhoodClient:
             hard-code it.
         base_url: API base URL (default ``https://madeonsol.com/api/v1``).
         timeout: Per-request timeout in seconds (default 30).
-        max_retries: Retries on 429/5xx with exponential backoff (default 2).
+        max_retries: Key-mode GET retries on network errors and 429/5xx
+            with exponential backoff (default 2). POST/PATCH/DELETE are sent
+            once; failures may have an unknown outcome. Paid GETs are not
+            automatically replayed.
 
     The most recent response's rate-limit headers are exposed via
     ``last_rate_limit``:
@@ -448,174 +451,96 @@ class RobinhoodClient:
                 self._raise_for_status(resp)
                 return resp.json()
 
-    def _post(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
-        """Synchronous POST (JSON body) with retry on transient failures."""
-        if self.auth_mode == "x402":
-            raise KeylessNotAvailableError(path)
-        url = f"{self.base_url}{path}"
-        attempt = 0
-        while True:
-            try:
-                resp = httpx.post(
-                    url, json=json_body, headers=self._headers, timeout=self.timeout
-                )
-            except httpx.HTTPError as exc:
-                if attempt >= self.max_retries:
-                    raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
-                time.sleep(_backoff(attempt))
-                attempt += 1
-                continue
-            self._capture_rate_limit(resp)
-            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
-                time.sleep(_backoff(attempt))
-                attempt += 1
-                continue
-            self._raise_for_status(resp)
-            return resp.json()
+    # Non-GET requests deliberately have no retry loop. A server may have
+    # applied the change before a transport error or 5xx reaches this client.
+    # This also covers stream-token rotation and POST-based batch reads.
 
-    async def _apost(
-        self, path: str, json_body: Optional[Dict[str, Any]] = None
-    ) -> Any:
-        """Asynchronous POST (JSON body) with retry on transient failures."""
+    def _post(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
+        """Synchronous POST sent once, without automatic retries."""
         if self.auth_mode == "x402":
             raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
-        attempt = 0
+        try:
+            resp = httpx.post(
+                url, json=json_body, headers=self._headers, timeout=self.timeout
+            )
+        except httpx.HTTPError as exc:
+            raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+        self._capture_rate_limit(resp)
+        self._raise_for_status(resp)
+        return resp.json()
+
+    async def _apost(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
+        """Asynchronous POST sent once, without automatic retries."""
+        if self.auth_mode == "x402":
+            raise KeylessNotAvailableError(path)
+        url = f"{self.base_url}{path}"
         async with httpx.AsyncClient(timeout=self.timeout) as http:
-            while True:
-                try:
-                    resp = await http.post(url, json=json_body, headers=self._headers)
-                except httpx.HTTPError as exc:
-                    if attempt >= self.max_retries:
-                        raise RobinhoodError(
-                            f"Request to {path} failed: {exc}"
-                        ) from exc
-                    await asyncio.sleep(_backoff(attempt))
-                    attempt += 1
-                    continue
-                self._capture_rate_limit(resp)
-                if (
-                    resp.status_code in _RETRY_STATUSES
-                    and attempt < self.max_retries
-                ):
-                    await asyncio.sleep(_backoff(attempt))
-                    attempt += 1
-                    continue
-                self._raise_for_status(resp)
-                return resp.json()
+            try:
+                resp = await http.post(url, json=json_body, headers=self._headers)
+            except httpx.HTTPError as exc:
+                raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+        self._capture_rate_limit(resp)
+        self._raise_for_status(resp)
+        return resp.json()
 
     def _patch(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
-        """Synchronous PATCH (JSON body) with retry on transient failures."""
+        """Synchronous PATCH sent once, without automatic retries."""
         if self.auth_mode == "x402":
             raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
-        attempt = 0
-        while True:
-            try:
-                resp = httpx.patch(
-                    url, json=json_body, headers=self._headers, timeout=self.timeout
-                )
-            except httpx.HTTPError as exc:
-                if attempt >= self.max_retries:
-                    raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
-                time.sleep(_backoff(attempt))
-                attempt += 1
-                continue
-            self._capture_rate_limit(resp)
-            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
-                time.sleep(_backoff(attempt))
-                attempt += 1
-                continue
-            self._raise_for_status(resp)
-            return resp.json()
+        try:
+            resp = httpx.patch(
+                url, json=json_body, headers=self._headers, timeout=self.timeout
+            )
+        except httpx.HTTPError as exc:
+            raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+        self._capture_rate_limit(resp)
+        self._raise_for_status(resp)
+        return resp.json()
 
-    async def _apatch(
-        self, path: str, json_body: Optional[Dict[str, Any]] = None
-    ) -> Any:
-        """Asynchronous PATCH (JSON body) with retry on transient failures."""
+    async def _apatch(self, path: str, json_body: Optional[Dict[str, Any]] = None) -> Any:
+        """Asynchronous PATCH sent once, without automatic retries."""
         if self.auth_mode == "x402":
             raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
-        attempt = 0
         async with httpx.AsyncClient(timeout=self.timeout) as http:
-            while True:
-                try:
-                    resp = await http.patch(url, json=json_body, headers=self._headers)
-                except httpx.HTTPError as exc:
-                    if attempt >= self.max_retries:
-                        raise RobinhoodError(
-                            f"Request to {path} failed: {exc}"
-                        ) from exc
-                    await asyncio.sleep(_backoff(attempt))
-                    attempt += 1
-                    continue
-                self._capture_rate_limit(resp)
-                if (
-                    resp.status_code in _RETRY_STATUSES
-                    and attempt < self.max_retries
-                ):
-                    await asyncio.sleep(_backoff(attempt))
-                    attempt += 1
-                    continue
-                self._raise_for_status(resp)
-                return resp.json()
+            try:
+                resp = await http.patch(url, json=json_body, headers=self._headers)
+            except httpx.HTTPError as exc:
+                raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+        self._capture_rate_limit(resp)
+        self._raise_for_status(resp)
+        return resp.json()
 
     def _delete(self, path: str) -> Any:
-        """Synchronous DELETE (no body) with retry on transient failures.
-
-        Safe to retry: every rule-engine DELETE is scoped by ``id`` AND
-        ``user_id`` and returns 404 once the row is gone, so a retried delete
-        can never remove someone else's rule.
-        """
+        """Synchronous DELETE sent once, without automatic retries."""
         if self.auth_mode == "x402":
             raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
-        attempt = 0
-        while True:
-            try:
-                resp = httpx.delete(url, headers=self._headers, timeout=self.timeout)
-            except httpx.HTTPError as exc:
-                if attempt >= self.max_retries:
-                    raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
-                time.sleep(_backoff(attempt))
-                attempt += 1
-                continue
-            self._capture_rate_limit(resp)
-            if resp.status_code in _RETRY_STATUSES and attempt < self.max_retries:
-                time.sleep(_backoff(attempt))
-                attempt += 1
-                continue
-            self._raise_for_status(resp)
-            return resp.json()
+        try:
+            resp = httpx.delete(
+                url, headers=self._headers, timeout=self.timeout
+            )
+        except httpx.HTTPError as exc:
+            raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+        self._capture_rate_limit(resp)
+        self._raise_for_status(resp)
+        return resp.json()
 
     async def _adelete(self, path: str) -> Any:
-        """Asynchronous DELETE (no body) with retry on transient failures."""
+        """Asynchronous DELETE sent once, without automatic retries."""
         if self.auth_mode == "x402":
             raise KeylessNotAvailableError(path)
         url = f"{self.base_url}{path}"
-        attempt = 0
         async with httpx.AsyncClient(timeout=self.timeout) as http:
-            while True:
-                try:
-                    resp = await http.delete(url, headers=self._headers)
-                except httpx.HTTPError as exc:
-                    if attempt >= self.max_retries:
-                        raise RobinhoodError(
-                            f"Request to {path} failed: {exc}"
-                        ) from exc
-                    await asyncio.sleep(_backoff(attempt))
-                    attempt += 1
-                    continue
-                self._capture_rate_limit(resp)
-                if (
-                    resp.status_code in _RETRY_STATUSES
-                    and attempt < self.max_retries
-                ):
-                    await asyncio.sleep(_backoff(attempt))
-                    attempt += 1
-                    continue
-                self._raise_for_status(resp)
-                return resp.json()
+            try:
+                resp = await http.delete(url, headers=self._headers)
+            except httpx.HTTPError as exc:
+                raise RobinhoodError(f"Request to {path} failed: {exc}") from exc
+        self._capture_rate_limit(resp)
+        self._raise_for_status(resp)
+        return resp.json()
 
     @staticmethod
     def _body(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -909,6 +834,151 @@ class RobinhoodClient:
                 "provider": provider,
                 "dex": dex,
                 "before": before,
+            },
+        )
+
+    def token_locks(
+        self,
+        *,
+        limit: int = 50,
+        since: Optional[str] = None,
+        before: Optional[str] = None,
+        token: Optional[str] = None,
+        sender: Optional[str] = None,
+        recipient: Optional[str] = None,
+        locker: Optional[str] = None,
+        family: Optional[str] = None,
+        kind: Optional[str] = None,
+        subject: Optional[str] = None,
+        status: Optional[str] = None,
+        min_usd: Optional[float] = None,
+        min_pct_of_supply: Optional[float] = None,
+    ) -> t.TokenLocksResponse:
+        """Token locks & vesting feed — newest lock contracts across all tokens (PRO+).
+
+        Newest lock / vesting contracts CREATED on Robinhood Chain, decoded from
+        the locker contracts' own events on our node (PinkLock-compatible,
+        HoodLock + vesting, Team Finance-compatible, Titan Locker, UNCX-compatible
+        LP lockers, Sablier Lockup v4). Each row carries the on-chain schedule
+        (``start_at`` / ``cliff_at`` / ``end_at``, ``cliff_amount``, tranche
+        ``schedule``) and a live derived view — ``locked_*`` (still locked right
+        now), ``unlocked_*``, ``next_unlock`` (cliff | final | tranche),
+        ``status``. ``sender`` is the depositor / creator (compare with the
+        token's deployer for a dev lock); ``recipient`` the beneficiary.
+
+        **Create-only tape**: withdrawals / cancels are not tracked (no RHC
+        locker publishes a verified release event shape), so ``withdrawn`` is
+        ``None`` — never 0 — and ``coverage["withdrawals_tracked"]`` is
+        ``False``. LP locks are stored with ``subject == "lp"``, excluded unless
+        ``subject="lp"`` / ``"all"``, and never claim usd / pct (pair units).
+        Amounts are raw base units as decimal **strings**.
+
+        Args:
+            limit: 1–100 (default 50).
+            since: ISO instant — only locks created after it (poll cursor =
+                ``pagination["next_since"]``).
+            before: ISO instant — page back (``pagination["next_before"]``).
+            token, sender, recipient, locker: ``0x`` + 40-hex filters.
+            family: closed enum (``pinklock`` … ``sablier``).
+            kind: ``'lock'`` | ``'vesting'``.
+            subject: ``'token'`` (default) | ``'lp'`` | ``'all'``.
+            status: ``'active'`` | ``'completed'``.
+            min_usd, min_pct_of_supply: post-filters on the deposited amount.
+
+        Route: ``GET /api/v1/rhc/tokens/locks``. Tier: PRO+. Pushed live on
+        WS channel ``rhc:token_locks``.
+        """
+        return self._get(
+            "/rhc/tokens/locks",
+            {
+                "limit": limit,
+                "since": since,
+                "before": before,
+                "token": token,
+                "sender": sender,
+                "recipient": recipient,
+                "locker": locker,
+                "family": family,
+                "kind": kind,
+                "subject": subject,
+                "status": status,
+                "min_usd": min_usd,
+                "min_pct_of_supply": min_pct_of_supply,
+            },
+        )
+
+    def token_lock_summary(
+        self,
+        address: str,
+        *,
+        status: Optional[str] = None,
+        family: Optional[str] = None,
+        subject: Optional[str] = None,
+        limit: int = 200,
+    ) -> t.TokenLockSummaryResponse:
+        """Every lock / vesting contract on one RHC token + live summary (PRO+).
+
+        ``summary`` covers the token-subject rows: locked / deposited (raw + ui
+        + usd + % of supply), ``unlocking_7d_*`` / ``unlocking_30d_*``, nearest
+        ``next_unlock``, ``active_cancelable_by_sender``, counts by family /
+        kind, distinct depositing wallets; LP locks are counted apart
+        (``lp_lock_count``) because their amounts are pair units. Rows are
+        active-first, largest locked first.
+
+        Args:
+            address: token address (``0x`` + 40 hex).
+            status: ``'active'`` | ``'completed'``.
+            family: closed enum.
+            subject: ``'token'`` | ``'lp'`` | ``'all'`` (default all).
+            limit: rows returned, 1–500 (the summary always covers every row).
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/locks``. Tier: PRO+.
+        """
+        return self._get(
+            f"/rhc/tokens/{address}/locks",
+            {"status": status, "family": family, "subject": subject, "limit": limit},
+        )
+
+    def token_unlocks(
+        self,
+        *,
+        within: str = "7d",
+        token: Optional[str] = None,
+        family: Optional[str] = None,
+        kind: Optional[str] = None,
+        min_usd: Optional[float] = None,
+        min_pct_of_supply: Optional[float] = None,
+        sort: str = "soonest",
+        limit: int = 50,
+    ) -> t.TokenUnlocksResponse:
+        """Upcoming unlock EVENTS across all active RHC lock / vesting contracts (PRO+).
+
+        Each active contract's NEXT cliff / tranche / final unlock inside the
+        window, with ``amount_*`` (the event) and ``window_amount_*`` (the
+        contract's total release over the whole window). Linear per-second
+        streams contribute cliff / final events only. Token subject only.
+
+        Args:
+            within: ``'1h'|'6h'|'24h'|'3d'|'7d'|'14d'|'30d'|'90d'`` (default 7d).
+            token: ``0x`` + 40 hex.
+            family, kind: closed enums.
+            min_usd, min_pct_of_supply: on the next-event amount.
+            sort: ``'soonest'`` | ``'largest_usd'`` | ``'largest_pct'``.
+            limit: 1–200 (default 50).
+
+        Route: ``GET /api/v1/rhc/tokens/unlocks``. Tier: PRO+.
+        """
+        return self._get(
+            "/rhc/tokens/unlocks",
+            {
+                "within": within,
+                "token": token,
+                "family": family,
+                "kind": kind,
+                "min_usd": min_usd,
+                "min_pct_of_supply": min_pct_of_supply,
+                "sort": sort,
+                "limit": limit,
             },
         )
 
@@ -2612,6 +2682,9 @@ _GET_ENDPOINTS = frozenset(
         "kol_wallet",
         "trades",
         "lp_events",
+        "token_locks",
+        "token_lock_summary",
+        "token_unlocks",
         "tokens",
         "equities",
         "token",
