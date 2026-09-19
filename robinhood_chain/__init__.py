@@ -5,6 +5,7 @@ Solana MadeOnSol API."""
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 from .client import RobinhoodClient, NULL, KeylessNotAvailableError, KEYLESS_ENDPOINTS
+from .payment_policy import PaymentPolicy, PaymentPolicyError
 from .errors import (
     RobinhoodError,
     RobinhoodAPIError,
@@ -19,6 +20,8 @@ from .stream import RobinhoodStream
 
 __all__ = [
     "RobinhoodClient",
+    "PaymentPolicy",
+    "PaymentPolicyError",
     "KeylessNotAvailableError",
     "KEYLESS_ENDPOINTS",
     "RobinhoodStream",
@@ -37,3 +40,4 @@ try:
     __version__ = _pkg_version("robinhood-chain")
 except PackageNotFoundError:  # running from source without an installed dist
     __version__ = "0.0.0"
+

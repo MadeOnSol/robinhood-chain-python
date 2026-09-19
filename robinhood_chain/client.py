@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import inspect
+import math
 import re
 import secrets
 import time
@@ -23,6 +25,7 @@ from typing import Any, Dict, Optional, Sequence
 
 import httpx
 
+from .payment_policy import PaymentBudget, PaymentPolicy, PaymentPolicyError, payment_origin
 from .errors import RobinhoodError, error_for_status
 from . import types as t
 
@@ -70,7 +73,6 @@ _TRANSFER_WITH_AUTHORIZATION_TYPES = {
         {"name": "nonce", "type": "bytes32"},
     ]
 }
-_AUTH_TTL_SECONDS = 300
 _EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -163,8 +165,11 @@ class RobinhoodClient:
         x402_base_url: str = X402_BASE_URL,
         timeout: float = 30.0,
         max_retries: int = 2,
+        payment_policy: Optional[PaymentPolicy] = None,
     ) -> None:
         self.auth_mode = "key" if api_key else ("x402" if private_key else None)
+        self._payment_budget = None
+        self._payment_origin = None
         self._account = None
         self._private_key: Optional[str] = None
         #: Decoded PAYMENT-RESPONSE of the last paid call (keyless mode).
@@ -200,6 +205,10 @@ class RobinhoodClient:
                     "private_key must be a 0x-prefixed 32-byte hex EVM private key "
                     "(the wallet that holds USDG on Robinhood Chain)."
                 )
+            self._payment_origin = payment_origin(x402_base_url)
+            self._payment_budget = PaymentBudget(payment_policy)
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise PaymentPolicyError("timeout must be finite and positive in keyless mode")
             self._private_key = private_key
             self._headers = {
                 "User-Agent": f"robinhood-chain-python/{_UA_VERSION}",
@@ -294,12 +303,14 @@ class RobinhoodClient:
         now = int(time.time())
         nonce = "0x" + secrets.token_hex(32)
         to = leg["payTo"]
+        valid_after = max(0, now - 60)  # client clock a few s fast must not yield a chain-rejected auth
+        valid_before = now + leg["maxTimeoutSeconds"]
         message = {
             "from": account.address,
             "to": to,
             "value": int(leg["amount"]),
-            "validAfter": 0,
-            "validBefore": now + _AUTH_TTL_SECONDS,
+            "validAfter": valid_after,
+            "validBefore": valid_before,
             "nonce": bytes.fromhex(nonce[2:]),
         }
         signable = encode_typed_data(
@@ -320,8 +331,8 @@ class RobinhoodClient:
                     "from": account.address,
                     "to": to,
                     "value": str(leg["amount"]),
-                    "validAfter": "0",
-                    "validBefore": str(now + _AUTH_TTL_SECONDS),
+                    "validAfter": str(valid_after),
+                    "validBefore": str(valid_before),
                     "nonce": nonce,
                 },
             },
@@ -337,63 +348,135 @@ class RobinhoodClient:
         except Exception:  # noqa: BLE001
             self.last_payment = None
 
+    @property
+    def authorized_amount_atomic(self) -> int:
+        """Reserved plus signer-attempted USDG units; not settled on-chain spend."""
+        return self._payment_budget.authorized_amount_atomic if self._payment_budget else 0
+
+    def _payment_deadline(self, url: str) -> float:
+        if payment_origin(url) != self._payment_origin:
+            raise PaymentPolicyError("Payment origin changed after client construction")
+        return time.monotonic() + self._payment_budget.policy.timeout_seconds
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise PaymentPolicyError("Keyless payment deadline exceeded")
+        return left
+
+    def _approve_payment(self, proposal, deadline: float) -> None:
+        self._remaining(deadline)
+        hook = self._payment_budget.policy.before_payment
+        if hook is not None:
+            approved = hook(proposal)
+            if inspect.isawaitable(approved):
+                if inspect.iscoroutine(approved):
+                    approved.close()
+                raise PaymentPolicyError("Async before_payment requires an async client method")
+            if approved is not True:
+                raise PaymentPolicyError("before_payment did not approve the payment")
+        self._remaining(deadline)
+
+    async def _aapprove_payment(self, proposal, deadline: float) -> None:
+        self._remaining(deadline)
+        hook = self._payment_budget.policy.before_payment
+        if hook is not None:
+            approved = hook(proposal)
+            if inspect.isawaitable(approved):
+                approved = await asyncio.wait_for(approved, timeout=self._remaining(deadline))
+            if approved is not True:
+                raise PaymentPolicyError("before_payment did not approve the payment")
+        self._remaining(deadline)
+
     def _get_x402(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        """Keyless GET: 402 challenge → sign USDG leg → retry with PAYMENT-SIGNATURE."""
+        """One challenge and at most one signed submission, within an explicit budget."""
         if _keyless_template(path) not in _KEYLESS_SET:
             raise KeylessNotAvailableError(path)
         url = f"{self.x402_base_url}{path}"
         clean = self._clean(params)
-        first = httpx.get(url, params=clean, headers=self._headers, timeout=self.timeout)
+        request_url = str(httpx.Request("GET", url, params=clean).url)
+        deadline = self._payment_deadline(url)
+        first = httpx.get(url, params=clean, headers=self._headers,
+                          timeout=min(self.timeout, self._remaining(deadline)), follow_redirects=False)
+        self._remaining(deadline)
         if first.status_code != 402:
             self._capture_rate_limit(first)
             self._raise_for_status(first)
             return first.json()
         try:
             challenge = first.json()
-        except Exception:  # noqa: BLE001
-            challenge = {}
-        leg = next((a for a in challenge.get("accepts", []) if a.get("network") == _RHC_NETWORK), None)
-        if leg is None:
-            raise RobinhoodError(f"x402 challenge for {path} has no USDG-on-Robinhood-Chain leg")
-        headers = dict(self._headers)
-        headers["PAYMENT-SIGNATURE"] = self._payment_header(leg)
-        resp = httpx.get(url, params=clean, headers=headers, timeout=self.timeout)
-        self._capture_payment(resp)
-        self._capture_rate_limit(resp)
-        if not resp.is_success:
-            raise RobinhoodError(
-                f"x402 payment for {path} rejected (HTTP {resp.status_code}): {resp.text[:400]}"
-            )
-        return resp.json()
+        except ValueError:
+            challenge = None
+        proposal = self._payment_budget.select(challenge, request_url)
+        reservation = self._payment_budget.reserve(proposal)
+        try:
+            self._approve_payment(proposal, deadline)
+            leg = dict(proposal)
+            signing_started = int(time.time())
+            reservation.signer_invoked()
+            payment = self._payment_header(leg)
+            self._remaining(deadline)
+            if int(time.time()) >= signing_started + leg["maxTimeoutSeconds"]:
+                raise PaymentPolicyError("Payment authorization expired before submission")
+            headers = {**self._headers, "PAYMENT-SIGNATURE": payment}
+            # The deadline bounds everything up to SUBMISSION. Once the signed
+            # payment is sent it may settle, so its response (data + receipt) is
+            # always read and captured, never discarded for arriving late.
+            resp = httpx.get(url, params=clean, headers=headers, timeout=self.timeout, follow_redirects=False)
+            self._capture_payment(resp)
+            self._capture_rate_limit(resp)
+            if not resp.is_success:
+                raise RobinhoodError(f"x402 payment for {path} rejected (HTTP {resp.status_code}): {resp.text[:400]}")
+            return resp.json()
+        finally:
+            reservation.release()
 
     async def _aget_x402(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         if _keyless_template(path) not in _KEYLESS_SET:
             raise KeylessNotAvailableError(path)
         url = f"{self.x402_base_url}{path}"
         clean = self._clean(params)
-        async with httpx.AsyncClient(timeout=self.timeout) as http:
-            first = await http.get(url, params=clean, headers=self._headers)
+        request_url = str(httpx.Request("GET", url, params=clean).url)
+        deadline = self._payment_deadline(url)
+        # The deadline bounds the pre-submission phase (challenge, approval,
+        # signing) via wait_for inside the attempt; the paid request itself is
+        # never cancelled by it, so a paid response is not lost for arriving late.
+        return await self._aget_x402_attempt(url, clean, request_url, deadline)
+
+    async def _aget_x402_attempt(self, url, clean, request_url, deadline):
+        async with httpx.AsyncClient(timeout=min(self.timeout, self._remaining(deadline)), follow_redirects=False) as http:
+            first = await asyncio.wait_for(http.get(url, params=clean, headers=self._headers),
+                                           timeout=self._remaining(deadline))
+            self._remaining(deadline)
             if first.status_code != 402:
                 self._capture_rate_limit(first)
                 self._raise_for_status(first)
                 return first.json()
             try:
                 challenge = first.json()
-            except Exception:  # noqa: BLE001
-                challenge = {}
-            leg = next((a for a in challenge.get("accepts", []) if a.get("network") == _RHC_NETWORK), None)
-            if leg is None:
-                raise RobinhoodError(f"x402 challenge for {path} has no USDG-on-Robinhood-Chain leg")
-            headers = dict(self._headers)
-            headers["PAYMENT-SIGNATURE"] = self._payment_header(leg)
-            resp = await http.get(url, params=clean, headers=headers)
-            self._capture_payment(resp)
-            self._capture_rate_limit(resp)
-            if not resp.is_success:
-                raise RobinhoodError(
-                    f"x402 payment for {path} rejected (HTTP {resp.status_code}): {resp.text[:400]}"
-                )
-            return resp.json()
+            except ValueError:
+                challenge = None
+            proposal = self._payment_budget.select(challenge, request_url)
+            reservation = self._payment_budget.reserve(proposal)
+            try:
+                await asyncio.wait_for(self._aapprove_payment(proposal, deadline), timeout=self._remaining(deadline))
+                leg = dict(proposal)
+                signing_started = int(time.time())
+                reservation.signer_invoked()
+                payment = self._payment_header(leg)
+                self._remaining(deadline)
+                if int(time.time()) >= signing_started + leg["maxTimeoutSeconds"]:
+                    raise PaymentPolicyError("Payment authorization expired before submission")
+                headers = {**self._headers, "PAYMENT-SIGNATURE": payment}
+                resp = await http.get(url, params=clean, headers=headers, timeout=self.timeout)
+                self._capture_payment(resp)
+                self._capture_rate_limit(resp)
+                if not resp.is_success:
+                    raise RobinhoodError(f"x402 payment for {url} rejected (HTTP {resp.status_code}): {resp.text[:400]}")
+                return resp.json()
+            finally:
+                reservation.release()
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Synchronous GET with retry on transient failures."""
@@ -2835,3 +2918,4 @@ class _RecordingProxy:
 def _backoff(attempt: int) -> float:
     """Exponential backoff: 0.5s, 1s, 2s, ... capped at 8s."""
     return min(0.5 * (2 ** attempt), 8.0)
+

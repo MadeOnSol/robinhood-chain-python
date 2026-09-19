@@ -13,6 +13,8 @@ Live KOL trades and consensus clustering, token discovery, launch-bundle detecti
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card (live feeds 5-min delayed; paid tiers are real-time). Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
+> **New in 0.11.0 — BREAKING for keyless (x402) mode only: an explicit payment policy is required (security fix, SDK-01).** Before, a keyless client signed whatever USDG amount and recipient a 402 challenge asked for. Now `RobinhoodClient(private_key=..., payment_policy=PaymentPolicy(pay_to=..., max_amount_atomic=..., max_total_amount_atomic=...))` is required (optional `timeout_seconds`, `authorization_ttl_seconds`, `before_payment`), and the client refuses before signing any challenge whose scheme, network (`eip155:4663`), asset (USDG), recipient or amount falls outside it. Use the canonical merchant address below and caps of at least `40000` (0.04 USDG) per call. The budget is per client instance (sync and its `aclient()` share it): it is not wallet-wide, not shared between processes, and resets when a new instance is created. A paid response that arrives after the payment deadline is still returned with its receipt. **API-key users: no change, no new config.** Keyless requires the default base URL `https://madeonsol.com`.
+
 > **New in 0.10.0 — mutation calls are no longer retried automatically (security fix, SDK-02), plus token locks & vesting.** A lost response or transient network error after a `POST`/`PATCH`/`DELETE` (rule create, token rotation, watchlist change) used to retry automatically — which could duplicate a rule or rotate a token twice. Mutating calls (including the batch-read POST endpoints) now make exactly one attempt; `GET` retries/backoff and the keyless x402 flow are unchanged. If a mutating call fails, check current state before deciding whether to retry by hand. Also adds three RHC methods that were already live on the API but missing from this SDK: `client.token_locks(address)`, `client.token_lock_summary(address)`, `client.token_unlocks()` — the RHC twin of the Solana token-locks binding (PinkLock-compatible, HoodLock, Sablier v4, Team Finance-compatible, Titan, UNCX-compatible LP lockers; create-only, `withdrawn` always `None` since no RHC locker publishes a release/cancel event).
 >
 > **New in 0.9.1 — stream tokens never expire.** `POST /api/v1/stream/token` now returns the **same token on every call, forever** (server change of 2026-08-27). `expires_at` / `next_refresh_at` are **always `None`** now and kept only for wire compatibility; the response gained `rotated: bool` and `lifetime: str`. A token only stops working when the subscription lapses or you replace it with the new `client.stream_token(rotate=True)` (the previous value keeps working for 60 s). The server never rotates on its own and never sends `token_refresh` unless you rotated; a `4001` close means "mint again", never a timer. Preferred handshake auth is `Authorization: Bearer <token>` (`?token=` still works and is masked in access logs); RHC channels ride the same socket and token as Solana. `client.stream()` already fetched a token on every (re)connect and never read `expires_at`, so its behavior is unchanged — only its docs are.
@@ -23,7 +25,7 @@ Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra co
 
 > **New in 0.6.0 — wallet intelligence.** Ten new operations covering the Robinhood Chain wallet surface, which had no SDK binding at all until now: `wallet()`, `wallet_pnl()`, `wallet_positions()`, `wallet_trades()`, plus the watchlist — `wallet_tracker_list()`, `wallet_tracker_add()`, `wallet_tracker_remove()`, `wallet_tracker_relabel()`, `wallet_tracker_trades()` and `wallet_tracker_summary()`. Everything is **ETH**-denominated, and cost basis is FIFO over a rolling 90-day window — `cost_basis_observable_from` names the date the window opens, so a position opened before it reads as a sell with no matching buy. The profile / PnL / positions trio shares ONE snapshot cache server-side, so calling all three on an address costs roughly one computation rather than three; `cache_hit` says which call paid for it. Watchlist quotas are **per chain** (PRO 50 / ULTRA 100 / BUSINESS 500 RHC wallets), independent of your Solana list.
 
-> **New in 0.7.0 — keyless x402 mode.** `RobinhoodClient(private_key="0x…")`: any EVM wallet holding **USDG on Robinhood Chain** can call the 10 keyless endpoints (`kol_feed`, `kol_hot_tokens`, `kol_leaderboard`, `token`, `token_buyer_quality`, `token_kol_consensus`, `token_risk`, `token_holders`, `wallet_pnl`, `deployer_alerts`) with no API key — the client handles the 402 → sign EIP-3009 `transferWithAuthorization` (EIP-712 domain `{Global Dollar, 1, 4663}`) → retry flow, one payment per call, from $0.04. The wallet needs USDG but no ETH (our facilitator relays gas). `client.last_payment` carries the on-chain settlement (`transaction`, `payer`). Needs the extra `pip install "robinhood-chain[x402]"` (eth-account). Any other method on a keyless client raises `KeylessNotAvailableError` — it names the rail, it never silently downgrades. Sync + async both supported.
+> **New in 0.7.0 — keyless x402 mode.** `RobinhoodClient(private_key="0x…", payment_policy=policy)`: any EVM wallet holding **USDG on Robinhood Chain** can call the 10 keyless endpoints (`kol_feed`, `kol_hot_tokens`, `kol_leaderboard`, `token`, `token_buyer_quality`, `token_kol_consensus`, `token_risk`, `token_holders`, `wallet_pnl`, `deployer_alerts`) with no API key — the client handles the 402 → sign EIP-3009 `transferWithAuthorization` (EIP-712 domain `{Global Dollar, 1, 4663}`) → retry flow, one payment per call, from $0.04. The wallet needs USDG but no ETH (our facilitator relays gas). `client.last_payment` carries the on-chain settlement (`transaction`, `payer`). Needs the extra `pip install "robinhood-chain[x402]"` (eth-account). Any other method on a keyless client raises `KeylessNotAvailableError` — it names the rail, it never silently downgrades. Sync + async both supported.
 
 > **New in 0.5.0 — real-time WebSocket streaming.** A managed stream client (`client.stream()`) over `wss://madeonsol.com/ws/v1/stream` with auto-reconnect, token handling and typed callbacks, covering all six RHC channels — the KOL tape, the full DEX firehose, and the four rule-engine push channels. Channel names are the **canonical** server registry (`rhc:dex_trades`, not the `rhc:trades` spelling some 0.4.0 SDKs used — the server still accepts that as a deprecated alias). Needs the `stream` extra: `pip install "robinhood-chain[stream]"`. See [Real-time streaming](#real-time-streaming-new-in-050).
 
@@ -52,11 +54,18 @@ Two modes. **Key mode** — Bearer `msk_` API key, the same key and base URL as 
 
 ```python
 import os
-from robinhood_chain import RobinhoodClient
+from robinhood_chain import RobinhoodClient, PaymentPolicy
 
 # Keyless: USDG wallet on chain 4663, no signup. Read the key from the environment.
-agent = RobinhoodClient(private_key=os.environ["RHC_PAYER_KEY"])
-risk = agent.token_risk("0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec")   # NVDA, $0.02
+agent = RobinhoodClient(
+    private_key=os.environ["RHC_PAYER_KEY"],
+    payment_policy=PaymentPolicy(
+        pay_to="0xb2Af9Ad9EE09dAc999ac5A6Db993739128b27F10",  # canonical MadeOnSol merchant (see below)
+        max_amount_atomic=40_000,             # 0.04 USDG per authorization.
+        max_total_amount_atomic=1_000_000,    # 1 USDG per client instance.
+    ),
+)
+risk = agent.token_risk("0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec")   # NVDA; the USDG leg has a $0.04 floor
 print(risk["score"], agent.last_payment["transaction"])              # settlement tx on Robinhood Chain
 ```
 
@@ -66,6 +75,39 @@ from robinhood_chain import RobinhoodClient
 
 client = RobinhoodClient(api_key=os.environ["MADEONSOL_API_KEY"])
 ```
+
+### Required payment policy (SDK-01 upgrade)
+
+Keyless construction now requires a `PaymentPolicy`; API-key mode is unchanged. This is a
+breaking keyless change. Configure the trusted `pay_to` independently of the HTTP challenge.
+
+**Canonical MadeOnSol merchant address (USDG on Robinhood Chain, chain 4663):**
+`0xb2Af9Ad9EE09dAc999ac5A6Db993739128b27F10`. It is pinned here (GitHub + registry
+README) so you do not have to take it from a 402; https://madeonsol.com/api/x402/rhc
+lists the same value as a second check. If a challenge names any other address the
+client refuses to sign; that is the point of the policy. A rotation would ship as a
+new package release with a changelog entry, never only in a 402.
+
+The signer only accepts `exact` USDG on `eip155:4663`, contract
+`0x5fc5360d0400a0fd4f2af552add042d716f1d168`. Both requests require HTTPS and
+refuse redirects. Limits are positive Python integers or decimal strings in atomic units
+(1 USDG = 1,000,000); floats/bools are rejected and challenge amounts must be strings.
+
+`max_amount_atomic` caps a single authorization; `max_total_amount_atomic` caps the lifetime
+of one client across sync threads and async calls. `authorized_amount_atomic` includes
+reservations and signing attempts, including uncertain/failed outcomes once the signing
+path was invoked. A denial/cancellation before signing releases only that unsigned reservation.
+No automatic reset/refund exists. Budgets are per instance and not persistent or wallet-wide:
+keep one long-lived client per allowance; separate processes need an external coordinator.
+
+Optional `before_payment(proposal)` receives an immutable mapping; only literal `True`
+approves. Async hooks are supported by async methods and refused by sync methods.
+`timeout_seconds` defaults to 30; `authorization_ttl_seconds` defaults to 60 (1–300),
+also bounded by the challenge. Authorizations start with 5 seconds of clock-skew tolerance.
+A late signer result is never submitted. Async I/O has a whole-operation deadline;
+synchronous HTTP uses per-phase timeouts capped by remaining time and checks the deadline
+between steps. Synchronous hooks/signers cannot be forcibly interrupted. A timeout cannot
+undo a submitted proof. Existing `timeout` still bounds each HTTP phase.
 
 ## Endpoints — the 54 Robinhood Chain operations
 
@@ -556,3 +598,4 @@ Robinhood Chain is bundled into every tier at no extra cost. Get a key at [madeo
 ## License
 
 MIT
+
