@@ -2228,12 +2228,12 @@ class RobinhoodClient:
         delta from the moment you set it — the token must already be tracked on
         RHC with a market cap, else 400.
 
-        ⚠️ RHC alerts are POLLED (~15s off ``rhc_token_prices``), not evaluated
-        inside a live price loop: the RHC price writer runs on a separate box
-        and emits no ``pg_notify``, so there is nothing to react to. Effective
-        latency is that interval plus the token's own price-update cadence — do
-        NOT assume parity with the Solana alerts, which are sub-second. The
-        response spells this out in its ``evaluation`` block.
+        ⚠️ RHC alerts are evaluated as trades land on the ``rhc:dex_trade``
+        feed, with a price-table poll (5 s while the feed is degraded, 60 s
+        otherwise) and a trade-tape replay as safety nets. Latency is a few
+        seconds (the chain trade flush is ~2 s) — do NOT assume parity with the
+        Solana alerts, which are sub-second. The response spells this out in
+        its ``evaluation`` block.
 
         Args:
             token_address: Token address (``0x`` + 40 hex), lowercased on write.
@@ -2676,7 +2676,7 @@ class RobinhoodClient:
         return self._post("/stream/token", {"rotate": True} if rotate else None)
 
     def stream(
-        self, *, auto_reconnect: bool = True, max_backoff: float = 30.0
+        self, *, auto_reconnect: bool = True, max_backoff: float = 30.0, **stream_options: Any
     ) -> "RobinhoodStream":
         """Open a managed real-time WebSocket stream — auto-reconnect (the
         never-expiring stream token is fetched on every (re)connect; there is
@@ -2692,12 +2692,17 @@ class RobinhoodClient:
             stream.subscribe(["rhc:kol_trades"])
             await stream.run()
 
-        The six channels are listed in :data:`robinhood_chain.stream.CHANNELS`
-        (``rhc:dex_trades`` is ULTRA+; the rest are PRO+). If a subscribe names
+        The channels are listed in :data:`robinhood_chain.stream.CHANNELS`
+        (``rhc:dex_trades``, ``rhc:dex_trades_unattributed`` and
+        ``rhc:new_tokens`` are ULTRA+; the rest are PRO+). If a subscribe names
         an invalid or tier-gated channel the server answers with a
         ``channels_rejected`` warning frame — register
         ``stream.on("warning", ...)`` to handle it, or it is raised through
         :func:`warnings.warn` so it can never pass silently.
+
+        ``stream_options`` go to :class:`RobinhoodStream` — e.g. ``resume=``
+        (a cursor you persisted from ``stream.get_cursor()``), ``dedupe_size``,
+        ``max_auth_retries``, ``connection_limit_backoff``.
         """
         from .stream import RobinhoodStream
 
@@ -2705,7 +2710,7 @@ class RobinhoodClient:
             return await asyncio.to_thread(self.stream_token)
 
         return RobinhoodStream(
-            _token, auto_reconnect=auto_reconnect, max_backoff=max_backoff
+            _token, auto_reconnect=auto_reconnect, max_backoff=max_backoff, **stream_options
         )
 
     # ── async ──────────────────────────────────────────────────────────────

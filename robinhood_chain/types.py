@@ -1058,11 +1058,21 @@ class PriceAlertListResponse(TypedDict, total=False):
     alerts: List[PriceAlert]
 
 
-class PriceAlertEvaluation(TypedDict, total=False):
-    """How RHC alerts are evaluated — polled, NOT a live price loop."""
+class PriceAlertFallbackPoll(TypedDict, total=False):
+    fast: int
+    slow: int
 
-    mode: str  # "polled"
-    interval_seconds: int
+
+class PriceAlertEvaluation(TypedDict, total=False):
+    """How RHC alerts are evaluated. Since 2026-09-15: event-driven off the
+    ``rhc:dex_trade`` feed, with price-table polls (``fallback_poll_seconds``)
+    and a trade-tape replay as safety nets — a few seconds, not sub-second like
+    the Solana alerts. Older servers answered ``mode: "polled"``."""
+
+    mode: str  # "event_driven" | "polled"
+    trigger: str  # "rhc:dex_trade" (absent when polled)
+    interval_seconds: int  # kept for compatibility: the fast fallback poll
+    fallback_poll_seconds: PriceAlertFallbackPoll
     note: str
 
 
