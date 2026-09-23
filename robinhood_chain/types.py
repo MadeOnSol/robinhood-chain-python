@@ -309,6 +309,145 @@ class RhcTokenUnlockScheduleEvent(TypedDict, total=False):
     withdrawals_tracked: bool  # always False on RHC
 
 
+# ── WS Phase 4 (2026-09-23): rhc:token_candles, rhc:token_risk, rhc:wallet_scores ──
+# Filters: rhc:token_candles {"addresses": [...] (REQUIRED, per-connection cap
+# PRO 25 / ULTRA 100 / BUSINESS 250), "updates": bool}; rhc:token_risk
+# {"addresses": [...] (REQUIRED, same caps), "risk_events":
+# ["rhc:risk_verdict_changed"], "risk_snapshot": bool (default True)};
+# rhc:wallet_scores {"wallets": [...] (REQUIRED, 0x deployers; may mix base58
+# when the subscription also holds wallet:scores), "score_events": [...]}.
+
+
+class RhcCandleClosedEvent(TypedDict, total=False):
+    """``rhc:candle_closed`` / ``rhc:candle_revised`` on ``rhc:token_candles`` —
+    the STORED rhc_ohlc_1m row, identical live and on a durable resume. Frame
+    id ``candle:robinhood:<address>:<bucket_start epoch s>`` (+ ``:r<n>`` for
+    the n-th revision). ``revision`` 0 = the close; a rewrite bumps it and is
+    announced as ``rhc:candle_revised`` with the full row."""
+
+    chain: str  # "robinhood"
+    address: str
+    bucket_start: str
+    bucket_end: str  # bucket_start + 60 s
+    closed_at: Optional[str]
+    revision: int
+    revised_at: Optional[str]  # None for revision 0
+    open_price_usd: Optional[float]
+    high_price_usd: Optional[float]
+    low_price_usd: Optional[float]
+    close_price_usd: Optional[float]
+    open_mc_usd: Optional[float]
+    high_mc_usd: Optional[float]
+    low_mc_usd: Optional[float]
+    close_mc_usd: Optional[float]
+    close_liquidity_usd: Optional[float]
+    close_supply: Optional[float]
+    volume_usd: Optional[float]
+    buy_volume_usd: Optional[float]
+    sell_volume_usd: Optional[float]
+    trades: Optional[int]
+    buy_count: Optional[int]
+    sell_count: Optional[int]
+    dex: Optional[str]
+    pool_address: Optional[str]
+    final: bool  # always True
+    source: str  # "rhc_ohlc_1m"
+
+
+class RhcCandleUpdateEvent(TypedDict, total=False):
+    """``rhc:candle_update`` (``filters={"updates": True}``) — the in-progress
+    minute, <= 1 per address per second. State stream: no id/seq, never
+    replayed, no snapshot on subscribe."""
+
+    chain: str
+    address: str
+    bucket_start: str
+    bucket_end: str
+    open_price_usd: Optional[float]
+    high_price_usd: Optional[float]
+    low_price_usd: Optional[float]
+    close_price_usd: Optional[float]
+    close_mc_usd: Optional[float]
+    volume_usd: Optional[float]
+    trades: Optional[int]
+    final: bool  # always False
+    as_of: Optional[str]
+    source: str  # "rhc-dex-stream:open_candle"
+
+
+class RhcRiskVerdict(TypedDict, total=False):
+    """A stored RHC risk verdict (event before/after, snapshot verdict).
+    ``score`` = 100 - penalties: HIGHER = SAFER, the opposite of Solana's
+    risk_score; never compare the two."""
+
+    score: Optional[int]
+    sellable: Optional[bool]
+    sellable_reason: Optional[str]
+    proxy_kind: Optional[str]
+    upgradeable: Optional[bool]
+    owner_model: Optional[str]
+    can_mint: Optional[bool]
+    can_pause: Optional[bool]
+    lp_custody: Optional[str]
+    lp_burned_pct: Optional[float]
+    code_size: Optional[int]
+    flags: List[str]
+
+
+class RhcRiskVerdictChangedEvent(TypedDict, total=False):
+    """``rhc:risk_verdict_changed`` on ``rhc:token_risk`` — a sweep recheck
+    stored a different verdict. The change happened somewhere in
+    (previous_checked_at, checked_at], never at checked_at. A first
+    assessment is never an event."""
+
+    chain: str
+    token_address: str
+    event_key: str  # <token>:verdict:<checked_at epoch ms>
+    changed: List[str]  # subset of score, sellable, proxy_kind, upgradeable, owner_model, can_mint, can_pause, lp_custody, flags
+    flags_added: List[str]
+    flags_removed: List[str]
+    before: RhcRiskVerdict
+    after: RhcRiskVerdict
+    checked_at: str
+    previous_checked_at: Optional[str]
+    score_semantics: str  # "higher_is_safer"
+    detection: Dict[str, Any]  # {method: "recheck_sweep", recheck_target_hours, sweep_interval_minutes, min_liquidity_usd, note}
+    written_at: str
+    source: str  # "rhc_token_risk"
+
+
+class RhcRiskVerdictSnapshot(TypedDict, total=False):
+    """``rhc:risk_verdict`` snapshot frame (snapshot=True, no id/seq) — the
+    current stored verdict of one scoped address."""
+
+    chain: str
+    token_address: str
+    assessed: bool
+    verdict: Optional[RhcRiskVerdict]
+    checked_at: Optional[str]
+    score_semantics: str  # "higher_is_safer"
+    source: str  # "rhc_token_risk"
+
+
+class RhcDeployerTierChangedEvent(TypedDict, total=False):
+    """``rhc:deployer_tier_changed`` on ``rhc:wallet_scores`` — the 5-min
+    mv_rhc_deployers refresh found a different tier ("recomputed at T").
+    Entering a ranked tier has tier_before "neutral"; a first appearance
+    already ranked has tier_before None + first_appearance True; leaving the
+    matview has tier_after None."""
+
+    event_key: str  # <address>:<refresh epoch ms>
+    chain: str
+    address: str
+    tier_before: Optional[str]  # elite | good | spammer | neutral
+    tier_after: Optional[str]
+    first_appearance: bool
+    stats: Optional[Dict[str, Any]]  # tokens_deployed, graduated, graduation_rate, runners, runner_rate, best_peak_mc_usd, first_deploy_at, last_deploy_at
+    computed_at: str
+    source: str  # "matview_refresh"
+    matview: str  # "mv_rhc_deployers"
+
+
 # ── /rhc/tokens ──
 
 

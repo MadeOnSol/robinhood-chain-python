@@ -534,7 +534,7 @@ async def main():
 asyncio.run(main())
 ```
 
-All eleven RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
+All fourteen RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
 
 | Channel | What it delivers (event names) | Tier |
 |---|---|---|
@@ -548,6 +548,9 @@ All eleven RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v
 | `rhc:kol:first_touches` | Broadcast first-touch feed (`rhc:kol:first_touch`) — the **channel** is PRO+; ULTRA gates the first-touch *subscription* CRUD endpoints, not this broadcast | PRO+ |
 | `rhc:token_locks` | A token lock / vesting contract created on chain (`rhc:token_lock`); with `filters={"lifecycle": True}` also the unlock schedule (`rhc:token_unlock_upcoming` / `rhc:token_unlock_available`) | PRO+ |
 | `rhc:lp_events` | Liquidity `add` / `remove` / `pool_created` on tracked Uniswap v2/v3/v4 pools with `in_range`, `active_share`, `share_of_reserves`, `material` (`rhc:lp_event`, `types.RhcLpStreamEvent`); durable resume | **ULTRA+** |
+| `rhc:token_candles` | Live 1-minute candles for `filters={"addresses": [...]}`: `rhc:candle_closed` / `rhc:candle_revised` (the stored row), with `"updates": True` also `rhc:candle_update` (in-progress minute); durable resume | PRO+ |
+| `rhc:token_risk` | `rhc:risk_verdict_changed` for `filters={"addresses": [...]}` + an `rhc:risk_verdict` snapshot; score higher = safer | PRO+ |
+| `rhc:wallet_scores` | `rhc:deployer_tier_changed` for `filters={"wallets": [...]}` (0x deployers) | PRO+ |
 | `rhc:token_prices` | Per-token price ticks for the addresses you name (`rhc:token_price`) — **address-scoped**: subscribe with `filters={"addresses": [...]}` (25 / 100 / 250 per connection); one `snapshot: True` frame per address, then at most one tick per address per 250 ms, each with `quality` fresh / stale / unreliable and `quality_reason`; no `seq` / `id` | PRO+ |
 
 Lifecycle events: `open`, `close`, `reconnect`, `subscribed`, `heartbeat`, `warning`, `cursor`, `replay`, `gap`, `fatal`, `error`, plus `"*"` for every data event. Deprecated spelling: the server accepts `rhc:trades` as an alias of `rhc:dex_trades` (some 0.4.0 SDKs shipped it); this SDK uses only canonical names.
@@ -617,6 +620,31 @@ stream.subscribe(["rhc:token_locks"], {"lifecycle": True, "events": ["rhc:token_
 @stream.on("rhc:lp_event")
 def on_lp(data, evt):
     print(data["dex"], data["pool"], data["action"], data.get("active_share"), data.get("share_of_reserves"))
+
+await stream.run()
+```
+
+### Candles, risk verdicts and deployer tiers *(server 2026-09-23)*
+
+All three are PRO+ and **scoped** (per-connection cap PRO 25 / ULTRA 100 / BUSINESS 250 across named subscriptions; over the cap or without a scope the channel is rejected, never truncated). `rhc:token_candles` needs `"addresses"` (a budget separate from `rhc:token_prices`): `rhc:candle_closed` is the stored 1-minute row, `rhc:candle_revised` the same row rewritten (`revision` n > 0), both resumable; `"updates": True` adds `rhc:candle_update`, the in-progress minute (≤ 1 per address per second, a state stream, never replayed). `rhc:token_risk` needs `"addresses"`: `rhc:risk_verdict_changed` when a sweep recheck stores a different verdict (the change happened somewhere in `(previous_checked_at, checked_at]`) plus an `rhc:risk_verdict` snapshot per address unless `"risk_snapshot": False`; `score` is **higher = safer**, the opposite of Solana's `risk_score`. `rhc:wallet_scores` needs `"wallets"` (0x deployer addresses): `rhc:deployer_tier_changed` after each 5-min refresh ("recomputed at T", not "changed at T"). TypedDicts: `types.RhcCandleClosedEvent`, `types.RhcRiskVerdictChangedEvent`, `types.RhcDeployerTierChangedEvent`, ….
+
+```python
+stream = client.stream()
+stream.subscribe(["rhc:token_candles"], {"addresses": [TOKEN], "updates": True}, sub_id="candles")
+stream.subscribe(["rhc:token_risk"], {"addresses": [TOKEN]}, sub_id="risk")
+stream.subscribe(["rhc:wallet_scores"], {"wallets": [DEPLOYER]}, sub_id="tiers")
+
+@stream.on("rhc:candle_closed")
+def on_candle(data, evt):
+    print(data["bucket_start"], data["open_price_usd"], data["close_price_usd"], data["volume_usd"])
+
+@stream.on("rhc:risk_verdict_changed")
+def on_verdict(data, evt):
+    print(data["token_address"], data["changed"], data["before"]["score"], "->", data["after"]["score"])
+
+@stream.on("rhc:deployer_tier_changed")
+def on_tier(data, evt):
+    print(data["address"], data["tier_before"], "->", data["tier_after"])
 
 await stream.run()
 ```

@@ -67,6 +67,18 @@ from urllib.parse import quote
 # rhc:token_unlock_available (passed within 30 min — claimable per the
 # schedule, NOT claimed; types.RhcTokenUnlockScheduleEvent). RHC claims,
 # extensions and cancels are not observable (withdrawals_tracked False).
+# WS Phase 4 (2026-09-23), all PRO+ and scoped (per-connection cap 25/100/250,
+# rejected, never truncated, over the cap or without a scope):
+#   rhc:token_candles           - live 1-minute candles for filters.addresses:
+#                                 rhc:candle_closed / rhc:candle_revised (the
+#                                 stored row; types.RhcCandleClosedEvent), and
+#                                 with filters.updates=True rhc:candle_update
+#                                 (in-progress minute, a state stream)         (PRO+)
+#   rhc:token_risk              - rhc:risk_verdict_changed for filters.addresses
+#                                 + an rhc:risk_verdict snapshot (risk_snapshot,
+#                                 default True); score HIGHER = SAFER          (PRO+)
+#   rhc:wallet_scores           - rhc:deployer_tier_changed for filters.wallets
+#                                 (0x deployer addresses)                      (PRO+)
 CHANNELS = (
     "rhc:kol_trades",
     "rhc:dex_trades",
@@ -79,6 +91,9 @@ CHANNELS = (
     "rhc:token_locks",
     "rhc:token_prices",
     "rhc:lp_events",
+    "rhc:token_candles",
+    "rhc:token_risk",
+    "rhc:wallet_scores",
 )
 
 # Deprecated spellings the server still accepts (acked under the canonical
@@ -101,6 +116,13 @@ EVENT_NAMES = (
     "rhc:token_unlock_available",  # same; claimable per the schedule, NOT claimed
     "rhc:token_price",  # on rhc:token_prices; the frame's snapshot=True marks the per-address snapshot
     "rhc:lp_event",     # on rhc:lp_events (ULTRA+)
+    # WS Phase 4 (2026-09-23)
+    "rhc:candle_closed",          # on rhc:token_candles — the stored 1-minute row, revision 0
+    "rhc:candle_revised",         # on rhc:token_candles — the stored row rewritten (revision n > 0)
+    "rhc:candle_update",          # on rhc:token_candles with filters["updates"] = True — a state stream
+    "rhc:risk_verdict_changed",   # on rhc:token_risk
+    "rhc:risk_verdict",           # on rhc:token_risk — snapshot frame (snapshot=True)
+    "rhc:deployer_tier_changed",  # on rhc:wallet_scores
 )
 
 # ── Shared stream core ─────────────────────────────────────────────────────
