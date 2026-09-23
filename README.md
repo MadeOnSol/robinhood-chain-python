@@ -13,6 +13,9 @@ Live KOL trades and consensus clustering, token discovery, launch-bundle detecti
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card (live feeds 5-min delayed; paid tiers are real-time). Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
+> **New in 0.13.0 — named subscriptions: several independent subscriptions per socket.** `subscribe(channels, filters, sub_id="...")`, `update_subscription(sub_id, filters)`, `unsubscribe("sub-id")`, `get_subscriptions()` / `await list_subscriptions()`. Each named subscription has its own channels and filters (the server caps the total per connection, default included: PRO 5, ULTRA 10, BUSINESS 20); frames carry `evt["sub_id"]`; an event matching several subscriptions is delivered once per subscription (dedupe per `(sub_id, id)`). Resume is per subscription with one commit for the connection. The plain `subscribe(channels, filters)` API is unchanged. See "Named subscriptions" in the stream section.
+> **Also in 0.13.0 — `rhc:token_prices` and enriched RHC trade payloads (WS Phase 2).** A tenth RHC channel, `rhc:token_prices` (PRO+, address-scoped): `stream.subscribe(["rhc:token_prices"], filters={"addresses": [...]})` (25 / 100 / 250 addresses per connection on PRO / ULTRA / BUSINESS, rejected above the cap) delivers one `snapshot: True` frame per address, then ticks derived from the RHC trade feed at most once per address per 250 ms, each with `quality` fresh | stale | unreliable and `quality_reason`; a stale or unreliable price is never delivered as fresh. `rhc:dex_trade` / `rhc:dex_trade_unattributed` frames now carry additive enrichment: exact `amount_in_raw` / `amount_out_raw` decimal strings (never floats — use `int()`), `token` + `quote` identity with decimals, `metadata_status`, `price_status` / `price_source` / `price_observed_at`, `mc_status` (why `mc_usd` is None) and `side` / `side_reason`. Every existing key keeps its name.
+
 > **New in 0.12.0 — stream recovery: resume cursor, de-duplication, honest gaps.** The managed stream now tracks the cursor `{ instance, seq, ts }` of the last frame your handlers finished and resumes after it on every reconnect (the v1 `resume` request, with an automatic fallback to `replay_since_seq` / `replay_since_ts` on older servers). Delivery is at-least-once, de-duplicated by event `id`; new lifecycle events `cursor`, `replay`, `gap` (what could not be recovered — a `seq` gap is never loss) and `fatal`. Close codes are handled: 4001 re-fetches the token (bounded), 4002 waits ≥ 60 s instead of looping every second, 4003 stops, 4008 resumes; the backoff resets only after a `subscribed` ack. Every server `warning` frame is emitted (incl. `channels_rejected` / `channels_revoked`). `CHANNELS` now lists all nine RHC channels (adds `rhc:dex_trades_unattributed`, `rhc:new_tokens`, `rhc:token_locks`); `client.stream(**options)` passes `resume=`, `dedupe_size=`, `max_auth_retries=`, `connection_limit_backoff=` through; the handshake token is URL-encoded; `PriceAlertEvaluation` documents `mode: "event_driven"` plus `trigger` / `fallback_poll_seconds`. See the stream section's "Recovery" notes.
 
 > **New in 0.11.0 — BREAKING for keyless (x402) mode only: an explicit payment policy is required (security fix, SDK-01).** Before, a keyless client signed whatever USDG amount and recipient a 402 challenge asked for. Now `RobinhoodClient(private_key=..., payment_policy=PaymentPolicy(pay_to=..., max_amount_atomic=..., max_total_amount_atomic=...))` is required (optional `timeout_seconds`, `authorization_ttl_seconds`, `before_payment`), and the client refuses before signing any challenge whose scheme, network (`eip155:4663`), asset (USDG), recipient or amount falls outside it. Use the canonical merchant address below and caps of at least `40000` (0.04 USDG) per call. The budget is per client instance (sync and its `aclient()` share it): it is not wallet-wide, not shared between processes, and resets when a new instance is created. A paid response that arrives after the payment deadline is still returned with its receipt. **API-key users: no change, no new config.** Keyless requires the default base URL `https://madeonsol.com`.
@@ -213,7 +216,10 @@ from robinhood_chain import RobinhoodClient, NULL
 
 client = RobinhoodClient(api_key="msk_...")
 
-# Follow three wallets, 0.05 ETH per copy, pushed over WebSocket
+# Follow three TRACKED KOL wallets (the set behind /rhc/kol/wallets), 0.05 ETH
+# per copy, pushed over WebSocket. Any 0x address is accepted, but only tracked
+# wallets can ever fire: check sub["subscription"]["source_wallets_untracked"]
+# and sub.get("warnings") (code "untracked_source_wallets") — added 2026-09-22.
 sub = client.copytrade_subscriptions_create(
     name="degen desk",
     source_wallets=["0xaaa...", "0xbbb...", "0xccc..."],
@@ -528,7 +534,7 @@ async def main():
 asyncio.run(main())
 ```
 
-All nine RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
+All ten RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
 
 | Channel | What it delivers (event names) | Tier |
 |---|---|---|
@@ -541,6 +547,7 @@ All nine RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/
 | `rhc:kol:coordination` | Coordination-alert fires (`rhc:kol:coordination`) | PRO+ |
 | `rhc:kol:first_touches` | Broadcast first-touch feed (`rhc:kol:first_touch`) — the **channel** is PRO+; ULTRA gates the first-touch *subscription* CRUD endpoints, not this broadcast | PRO+ |
 | `rhc:token_locks` | A token lock / vesting contract created on chain (`rhc:token_lock`) | PRO+ |
+| `rhc:token_prices` | Per-token price ticks for the addresses you name (`rhc:token_price`) — **address-scoped**: subscribe with `filters={"addresses": [...]}` (25 / 100 / 250 per connection); one `snapshot: True` frame per address, then at most one tick per address per 250 ms, each with `quality` fresh / stale / unreliable and `quality_reason`; no `seq` / `id` | PRO+ |
 
 Lifecycle events: `open`, `close`, `reconnect`, `subscribed`, `heartbeat`, `warning`, `cursor`, `replay`, `gap`, `fatal`, `error`, plus `"*"` for every data event. Deprecated spelling: the server accepts `rhc:trades` as an alias of `rhc:dex_trades` (some 0.4.0 SDKs shipped it); this SDK uses only canonical names.
 
@@ -573,6 +580,26 @@ async def persist(data, evt):
 stream.on("cursor", save_cursor)               # {"instance", "seq", "ts"}
 stream.on("gap", lambda g: print("may be missing:", g["reasons"], g["skipped"]))  # g["advanced_past_gap"]
 stream.on("fatal", lambda f: print("stream stopped:", f["code"], f["reason"]))
+```
+
+### Named subscriptions *(new in 0.13.0)*
+
+One socket can hold several independent subscriptions, each with its own channels and filters; the server caps the total per connection, the default one included (PRO 5, ULTRA 10, BUSINESS 20). `subscribe(channels, filters)` stays the connection's `"default"` subscription and its wire is unchanged; `subscribe(channels, filters, sub_id="...")` opens a named one (1-64 characters of `A-Z a-z 0-9 _ . -`). A frame delivered under a named subscription carries `evt["sub_id"]`. **An event that matches several subscriptions is delivered once per matching subscription**, each copy stamped with its `sub_id`: the client dedupes per `(sub_id, id)`, so the same event can legitimately reach a handler twice, under two sub_ids. Filters of one subscription never affect another. `update_subscription(sub_id, filters)` REPLACES that subscription's filters (`"default"` addresses the plain one), `unsubscribe("my-sub")` / `unsubscribe(sub_id="my-sub")` removes it, `get_subscriptions()` is the local view and `await stream.list_subscriptions()` asks the server (`list` / `subscriptions`). Server refusals arrive as `warning` frames carrying the `sub_id` and one of `invalid_sub_id`, `too_many_subscriptions`, `unknown_sub_id`, `invalid_filters`, `channels_rejected`, `channels_revoked`, `replay_in_progress`; a subscription refused as `too_many_subscriptions` or `invalid_sub_id` is dropped locally so reconnects stop re-requesting it. Lifecycle events `updated` and `unsubscribed` surface the server acks.
+
+**Resume with several subscriptions** is per subscription: on every reconnect each subscription is re-sent with the same cursor, the server serves one replay per subscription, one after another (`replay_start` … `replay_end` each carry the `sub_id`; live frames are held until the last one ends), and the cursor commits once ALL of them have ended, at the smallest `last_seq` / `last_ts` across them. The `replay` event lists `subscriptions` and the raw `ends` per subscription; a gap's `channels` entries are keyed `sub_id/channel` for named subscriptions, and an incomplete retryable replay is retried for those subscriptions only. Against an older server that ignores `sub_id`, the client emits `warning` `named_subscriptions_unsupported` once.
+
+```python
+stream = client.stream()
+stream.subscribe(["rhc:kol_trades"], {"action": "buy"}, sub_id="kol-buys")
+stream.subscribe(["rhc:dex_trades"], {}, sub_id="firehose")
+
+@stream.on("rhc:kol_trade")
+def on_event(data, evt):
+    print(evt.get("sub_id"), data)   # "kol-buys"
+
+stream.update_subscription("kol-buys", {"action": "buy"})
+stream.unsubscribe("firehose")
+await stream.run()
 ```
 
 ## Errors & rate limits

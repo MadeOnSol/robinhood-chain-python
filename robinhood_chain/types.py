@@ -978,6 +978,18 @@ class CopyTradeSubscription(TypedDict, total=False):
     is_active: bool
     created_at: str
     updated_at: str
+    # Added 2026-09-22 (absent on older servers). Only TRACKED Robinhood Chain
+    # KOL wallets (kol_evm_wallets — the set behind /rhc/kol/wallets) can ever
+    # fire; ``source_wallets_untracked`` lists the ones that never will. Both
+    # are None when the server could not read the reference set (see warnings).
+    source_wallets_tracked: Optional[List[str]]
+    source_wallets_untracked: Optional[List[str]]
+    warnings: List["CopyTradeRuleWarning"]  # present only when something needs attention
+
+
+class CopyTradeRuleWarning(TypedDict):
+    code: str  # "untracked_source_wallets" | "source_wallet_tracking_unavailable"
+    message: str
 
 
 class CopyTradeListResponse(TypedDict, total=False):
@@ -990,11 +1002,13 @@ class CopyTradeCreateResponse(TypedDict, total=False):
     subscription: CopyTradeSubscription
     webhook_secret: Optional[str]  # shown ONCE; None for websocket delivery
     note: str
+    warnings: List[CopyTradeRuleWarning]  # mirror of subscription["warnings"]; absent when there is nothing to say
 
 
 class CopyTradeGetResponse(TypedDict, total=False):
     chain: str
     subscription: CopyTradeSubscription
+    warnings: List[CopyTradeRuleWarning]  # mirror of subscription["warnings"] (GET one / PATCH); absent when there is nothing to say
 
 
 class DeletedResponse(TypedDict, total=False):

@@ -29,9 +29,10 @@ import asyncio
 import inspect
 import json
 import random
+import re
 import warnings
 from collections import OrderedDict
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
 # The Robinhood Chain channels you can subscribe to (mirrors the server
@@ -50,6 +51,11 @@ from urllib.parse import quote
 #   rhc:kol:coordination        - coordination alert fires                    (PRO+)
 #   rhc:kol:first_touches       - broadcast first-touch feed                  (PRO+)
 #   rhc:token_locks             - token lock / vesting contracts created      (PRO+)
+#   rhc:token_prices            - per-token price ticks for filters.addresses
+#                                 (address-scoped, 25/100/250 per connection):
+#                                 one snapshot frame per address (snapshot=True)
+#                                 then <= 1 tick / address / 250 ms, each with
+#                                 quality fresh | stale | unreliable + reason  (PRO+)
 CHANNELS = (
     "rhc:kol_trades",
     "rhc:dex_trades",
@@ -60,6 +66,7 @@ CHANNELS = (
     "rhc:kol:coordination",
     "rhc:kol:first_touches",
     "rhc:token_locks",
+    "rhc:token_prices",
 )
 
 # Deprecated spellings the server still accepts (acked under the canonical
@@ -78,6 +85,7 @@ EVENT_NAMES = (
     "rhc:kol:coordination",
     "rhc:kol:first_touch",
     "rhc:token_lock",
+    "rhc:token_price",  # on rhc:token_prices; the frame's snapshot=True marks the per-address snapshot
 )
 
 # ── Shared stream core ─────────────────────────────────────────────────────
@@ -95,6 +103,17 @@ CLOSE_AUTH_ERROR = 4003        # stop: "fatal"
 CLOSE_SLOW_CONSUMER = 4008     # reconnect and resume from the cursor
 
 _HELD_LIVE_CAP = 10_000
+
+# Named subscriptions (Phase 2): a subscribe without sub_id is the connection's
+# implicit "default" subscription; a client-chosen sub_id (1-64 chars of
+# A-Z a-z 0-9 _ . -) opens an independent one with its own channels + filters.
+DEFAULT_SUB_ID = "default"
+_SUB_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _sub_id_of(msg: Dict[str, Any]) -> str:
+    v = msg.get("sub_id")
+    return v if isinstance(v, str) and v else DEFAULT_SUB_ID
 
 
 class StreamConnectionLimitError(RuntimeError):
@@ -165,10 +184,11 @@ class _Recovery:
     __slots__ = (
         "protocol", "from_cursor", "channels", "request", "acked", "suppress_ack",
         "instance_changed", "start", "received", "delivered", "duplicates", "held", "deadline",
-        "max_seq", "max_ts",
+        "max_seq", "max_ts", "pending", "starts", "ends",
     )
 
-    def __init__(self, protocol: str, from_cursor: Optional[Dict[str, Any]], channels: List[str], request: Dict[str, Any]) -> None:
+    def __init__(self, protocol: str, from_cursor: Optional[Dict[str, Any]], channels: List[str], request: Dict[str, Any],
+                 pending: Optional[set] = None) -> None:
         self.protocol = protocol  # "detect" | "resume" | "legacy"
         self.from_cursor = from_cursor
         self.channels = channels
@@ -185,6 +205,11 @@ class _Recovery:
         # Highest seq / ts among replayed frames (commit fallback for older servers).
         self.max_seq: Optional[float] = None
         self.max_ts: Optional[float] = None
+        # Subscriptions ("default" included) whose replay_end is still awaited,
+        # and the replay_start / replay_end frames per subscription.
+        self.pending: set = set(pending) if pending is not None else {DEFAULT_SUB_ID}
+        self.starts: Dict[str, Dict[str, Any]] = {}
+        self.ends: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
 
 class RobinhoodStream:
@@ -253,6 +278,13 @@ class RobinhoodStream:
         self._handlers: Dict[str, List[Handler]] = {}
         self._channels: set = set()
         self._filters: Dict[str, Any] = {}
+        # Named subscriptions (Phase 2), in creation order: sub_id -> {"channels": set, "filters": dict}.
+        self._named: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # sub_ids of the subscribes sent on this connection whose ack is still due (acks arrive in order).
+        self._ack_expect: List[str] = []
+        self._named_unsupported_warned = False
+        self._list_waiters: List["asyncio.Future[List[Dict[str, Any]]]"] = []
+        self._retry_only: Optional[List[str]] = None
         self._ws: Any = None
         self._running = False
         self._attempt = 0
@@ -333,21 +365,129 @@ class RobinhoodStream:
             except Exception:
                 pass
 
-    def subscribe(self, channels: List[str], filters: Optional[Dict[str, Any]] = None) -> "RobinhoodStream":
-        """Subscribe to channels (sent on connect, or immediately if connected)."""
-        self._channels.update(channels)
-        if filters:
-            self._filters.update(filters)
+    def subscribe(self, channels: List[str], filters: Optional[Dict[str, Any]] = None, *,
+                  sub_id: Optional[str] = None) -> "RobinhoodStream":
+        """Subscribe to channels (sent on connect, or immediately if connected).
+
+        Without ``sub_id`` this is the connection's default subscription. With
+        ``sub_id`` it opens (or extends) a NAMED subscription with its own
+        channels and filters; frames delivered under it carry ``evt["sub_id"]``.
+        An event matching several subscriptions is delivered once per matching
+        subscription (deduped per ``(sub_id, id)``), so the same event CAN reach
+        a handler twice, under two sub_ids. A named subscription's ``filters``
+        are REPLACED when given. Caps per connection (default included):
+        PRO 5 / ULTRA 10 / BUSINESS 20."""
+        if sub_id is None or sub_id == DEFAULT_SUB_ID:
+            self._channels.update(channels)
+            if filters:
+                self._filters.update(filters)
+            if self._ws is not None:
+                asyncio.ensure_future(self._send_subscribe(only=[DEFAULT_SUB_ID]))
+            return self
+        if not isinstance(sub_id, str) or not _SUB_ID_RE.match(sub_id):
+            raise ValueError("sub_id must be 1-64 characters of A-Z a-z 0-9 _ . -")
+        entry = self._named.get(sub_id) or {"channels": set(), "filters": {}}
+        entry["channels"].update(channels)
+        if filters is not None:
+            entry["filters"] = dict(filters)
+        self._named[sub_id] = entry
         if self._ws is not None:
-            asyncio.ensure_future(self._send_subscribe())
+            asyncio.ensure_future(self._send_subscribe(only=[sub_id]))
         return self
 
-    def unsubscribe(self, channels: List[str]) -> "RobinhoodStream":
+    def update_subscription(self, sub_id: str, filters: Dict[str, Any]) -> "RobinhoodStream":
+        """Replace the filters of a subscription (``"default"`` for the plain
+        one). The server acks with an ``updated`` frame; a refused update (for
+        example a ``token:prices`` subscription without valid ``mints``) comes
+        back as a ``warning`` with code ``invalid_filters`` and the previous
+        filters stay."""
+        if sub_id == DEFAULT_SUB_ID:
+            self._filters = dict(filters)
+        else:
+            if sub_id not in self._named:
+                raise ValueError(f"unknown subscription {sub_id}")
+            self._named[sub_id]["filters"] = dict(filters)
+        if self._ws is not None:
+            msg: Dict[str, Any] = {"type": "update", "filters": filters}
+            if sub_id != DEFAULT_SUB_ID:
+                msg["sub_id"] = sub_id
+            asyncio.ensure_future(self._ws.send(json.dumps(msg)))
+        return self
+
+    def unsubscribe(self, channels: Union[List[str], str, None] = None, *,
+                    sub_id: Optional[str] = None) -> "RobinhoodStream":
+        """``unsubscribe([channels])`` stops those channels on the default
+        subscription; ``unsubscribe("my-sub")`` / ``unsubscribe(sub_id="my-sub")``
+        removes a whole named subscription."""
+        if isinstance(channels, str):
+            sub_id, channels = channels, None
+        if sub_id is not None and sub_id != DEFAULT_SUB_ID:
+            self._named.pop(sub_id, None)
+            self._forget_pending(sub_id)
+            if self._ws is not None:
+                asyncio.ensure_future(self._ws.send(json.dumps({"type": "unsubscribe", "sub_id": sub_id})))
+            return self
+        channels = list(channels or self._channels)
         for c in channels:
             self._channels.discard(c)
         if self._ws is not None:
             asyncio.ensure_future(self._ws.send(json.dumps({"type": "unsubscribe", "channels": channels})))
         return self
+
+    def get_subscriptions(self) -> List[Dict[str, Any]]:
+        """Every subscription this client asks for (local view, no round trip):
+        ``[{"sub_id", "channels", "filters"}, ...]``."""
+        out: List[Dict[str, Any]] = []
+        if self._channels:
+            out.append({"sub_id": DEFAULT_SUB_ID, "channels": sorted(self._channels), "filters": dict(self._filters)})
+        for sid, e in self._named.items():
+            out.append({"sub_id": sid, "channels": sorted(e["channels"]), "filters": dict(e["filters"])})
+        return out
+
+    async def list_subscriptions(self, timeout: float = 5.0) -> List[Dict[str, Any]]:
+        """Ask the server what this connection holds (``list`` -> ``subscriptions``).
+        Falls back to the local view when not connected or when the server does
+        not answer within ``timeout`` seconds."""
+        if self._ws is None:
+            return self.get_subscriptions()
+        fut: "asyncio.Future[List[Dict[str, Any]]]" = asyncio.get_running_loop().create_future()
+        self._list_waiters.append(fut)
+        try:
+            await self._ws.send(json.dumps({"type": "list"}))
+            return await asyncio.wait_for(fut, timeout)
+        except (asyncio.TimeoutError, Exception):
+            if fut in self._list_waiters:
+                self._list_waiters.remove(fut)
+            return self.get_subscriptions()
+
+    async def _collapse_pending(self, r: "_Recovery") -> None:
+        """A pre-Phase-2 server (ignores sub_id) answers every resume with ONE
+        replay for the whole connection, reported without sub_id: only
+        "default" can still be awaited. Finishes the recovery at once when that
+        one has already ended."""
+        if r.pending == {DEFAULT_SUB_ID}:
+            return
+        r.pending.clear()
+        if DEFAULT_SUB_ID not in r.ends:
+            r.pending.add(DEFAULT_SUB_ID)
+        if not r.pending and r.protocol != "detect":
+            await self._finish_recovery(r.ends.get(DEFAULT_SUB_ID))
+
+    def _forget_pending(self, sub_id: str) -> None:
+        """A subscription removed while its replay was still awaited: stop waiting for it."""
+        r = self._recovery
+        if r is None or sub_id not in r.pending:
+            return
+        r.pending.discard(sub_id)
+        if not r.pending and r.protocol != "detect":
+            last = next(reversed(r.ends.values())) if r.ends else None
+            asyncio.ensure_future(self._finish_recovery(last))
+
+    def _settle_list_waiters(self, answer: Optional[List[Dict[str, Any]]] = None) -> None:
+        waiters, self._list_waiters = self._list_waiters, []
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(answer if answer is not None else self.get_subscriptions())
 
     async def close(self) -> None:
         """Stop reconnecting and close the socket."""
@@ -399,11 +539,12 @@ class RobinhoodStream:
                     self._ws = ws
                     self._server_instance = None
                     self._first_subscribe_sent = False
+                    self._ack_expect = []
                     # The automatic re-resume budget is per CONNECTION (the docs say so).
                     self._resume_retries = 0
                     # The backoff attempt is NOT reset on open — only a `subscribed`
                     # ack proves the connection is usable.
-                    if self._channels:
+                    if self._channels or self._named:
                         await self._send_subscribe()
                     await self._emit("open", None)
                     code, reason = await self._receive_loop(ws, websockets)
@@ -416,6 +557,9 @@ class RobinhoodStream:
                 self._server_instance = None
                 self._retry_at = None
                 self._retry_from = None
+                self._retry_only = None
+                self._ack_expect = []
+                self._settle_list_waiters()
                 # An unfinished recovery is abandoned: held live frames are dropped
                 # undelivered and replayed frames never moved the cursor, so the
                 # next resume starts from the same pre-resume position.
@@ -500,8 +644,10 @@ class RobinhoodStream:
         loop = asyncio.get_running_loop()
         if self._retry_at is not None and loop.time() >= self._retry_at:
             frm, self._retry_at, self._retry_from = self._retry_from, None, None
+            only, self._retry_only = self._retry_only, None
             if self._ws is not None and self._recovery is None and frm:
-                await self._send_subscribe(frm)
+                # Only the subscriptions whose replay was incomplete are asked again.
+                await self._send_subscribe(frm, only=only)
         r = self._recovery
         if r is None or r.deadline is None or loop.time() < r.deadline:
             return
@@ -511,30 +657,54 @@ class RobinhoodStream:
         elif r.protocol == "legacy":
             await self._finish_recovery(None)
 
-    async def _send_subscribe(self, resume_override: Optional[Dict[str, Any]] = None) -> None:
-        if self._ws is None or not self._channels:
+    def _subscribe_frames(self, only: Optional[List[str]] = None) -> List[Tuple[str, Dict[str, Any]]]:
+        """The subscribe frames for the given subscriptions (default first, then named in creation order)."""
+        out: List[Tuple[str, Dict[str, Any]]] = []
+        if (only is None or DEFAULT_SUB_ID in only) and self._channels:
+            msg: Dict[str, Any] = {"type": "subscribe", "channels": sorted(self._channels)}
+            if self._filters:
+                msg["filters"] = self._filters
+            out.append((DEFAULT_SUB_ID, msg))
+        for sid, e in self._named.items():
+            if (only is not None and sid not in only) or not e["channels"]:
+                continue
+            out.append((sid, {"type": "subscribe", "sub_id": sid, "channels": sorted(e["channels"]), "filters": e["filters"]}))
+        return out
+
+    async def _send_subscribe(self, resume_override: Optional[Dict[str, Any]] = None,
+                              only: Optional[List[str]] = None) -> None:
+        """Send the subscribe(s). On a connection's FIRST subscribe (or an
+        explicit retry after a retryable gap) every subscription is sent with
+        the SAME resume cursor: the server serves one replay per subscription,
+        one after another, and holds live frames until the last replay_end. A
+        later subscribe adds channels live (no resume)."""
+        if self._ws is None:
             return
-        channels = sorted(self._channels)
-        msg: Dict[str, Any] = {"type": "subscribe", "channels": channels}
-        if self._filters:
-            msg["filters"] = self._filters
-        # Only the FIRST subscribe of a connection resumes (or an explicit retry
-        # after a retryable gap); a later subscribe adds channels live, and the
-        # server replays only the channels it names.
+        frames = self._subscribe_frames(only)
+        if not frames:
+            return
         if (not self._first_subscribe_sent or resume_override) and self._cursor and self._recovery is None:
             frm = dict(resume_override or self._cursor)
-            msg["resume"] = frm
-            self._recovery = _Recovery("detect", frm, channels, {"resume": frm})
+            channels: set = set()
+            for _, msg in frames:
+                msg["resume"] = frm
+                channels.update(msg["channels"])
+            self._recovery = _Recovery("detect", frm, sorted(channels), {"resume": frm}, pending={sid for sid, _ in frames})
         self._first_subscribe_sent = True
-        await self._ws.send(json.dumps(msg))
+        for sid, msg in frames:
+            self._ack_expect.append(sid)
+            await self._ws.send(json.dumps(msg))
 
     async def _fallback_to_legacy(self) -> None:
         """The server did not answer ``resume`` (older deployment): retry with
-        the legacy replay fields."""
+        the legacy replay fields. Such a server has no named subscriptions
+        either, so the one legacy replay covers the union of channels and
+        resolves every pending subscription at once."""
         r = self._recovery
         if r is None or r.protocol != "detect" or not r.from_cursor or self._ws is None:
             return
         r.protocol = "legacy"
+        r.pending = {DEFAULT_SUB_ID}
         r.instance_changed = not self._server_instance or self._server_instance != r.from_cursor["instance"]
         # Same process -> its ring still indexes our seq. Restarted -> use time.
         legacy = {"replay_since_ts": r.from_cursor["ts"]} if r.instance_changed else {"replay_since_seq": r.from_cursor["seq"]}
@@ -550,11 +720,93 @@ class RobinhoodStream:
         except Exception:
             pass
 
-    async def _finish_recovery(self, end: Optional[Dict[str, Any]]) -> None:
+    @staticmethod
+    def _aggregate_ends(r: "_Recovery", last_end: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """One ``replay_end`` per subscription -> one aggregate the single-replay
+        logic runs on unchanged: complete only when every subscription is; the
+        commit position is the SMALLEST last_seq / last_ts across them (a later
+        subscription's replay covered more, but the earlier one's live frames
+        from that point on are still only in the live flush); channel entries
+        keyed ``"<sub_id>/<channel>"`` for named subscriptions; ``retryable``
+        when any subscription says so."""
+        ends = list(r.ends.items())
+        if not ends:
+            return last_end
+        if len(ends) == 1 and ends[0][0] == DEFAULT_SUB_ID:
+            return ends[0][1]
+
+        def _num(v: Any) -> Optional[float]:
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        def _min(a: Optional[float], b: Optional[float]) -> Optional[float]:
+            return b if a is None else (a if b is None else min(a, b))
+
+        agg: Dict[str, Any] = dict(last_end if last_end is not None else ends[-1][1])
+        channels: Dict[str, Any] = {}
+        complete, retryable_known, retryable, truncated = True, True, False, False
+        last_seq = last_ts = live_from = retry_after = hint = None
+        count = sent = matched = 0
+        reason: Optional[str] = None
+        limits: Any = None
+        for sid, e in ends:
+            if e.get("complete") is False:
+                complete = False
+                if reason is None and isinstance(e.get("reason"), str):
+                    reason = e["reason"]
+            if not isinstance(e.get("retryable"), bool):
+                retryable_known = False
+            elif e["retryable"]:
+                retryable = True
+            if e.get("replay_truncated") is True:
+                truncated = True
+            chs = e.get("channels")
+            if isinstance(chs, dict):
+                for ch, raw in chs.items():
+                    channels[ch if sid == DEFAULT_SUB_ID else f"{sid}/{ch}"] = raw
+            last_seq = _min(last_seq, _num(e.get("last_seq")))
+            last_ts = _min(last_ts, _num(e.get("last_ts")))
+            live_from = _min(live_from, _num(e.get("live_from_seq")))
+            ra = _num(e.get("retry_after_ms"))
+            if ra is not None:
+                retry_after = ra if retry_after is None else max(retry_after, ra)
+            hint = _min(hint, _num(e.get("resume_ts_hint")))
+            count += _num(e.get("count")) or 0
+            sent += _num(e.get("sent")) or 0
+            matched += _num(e.get("matched")) or 0
+            if limits is None and isinstance(e.get("limits"), dict):
+                limits = e["limits"]
+        agg["complete"] = complete
+        agg["reason"] = None if complete else (reason or "incomplete")
+        agg["channels"] = channels
+        if retryable_known:
+            agg["retryable"] = retryable
+        else:
+            agg.pop("retryable", None)
+        if truncated:
+            agg["replay_truncated"] = True
+        agg["last_seq"], agg["last_ts"], agg["live_from_seq"] = last_seq, last_ts, live_from
+        if retry_after is not None:
+            agg["retry_after_ms"] = retry_after
+        else:
+            agg.pop("retry_after_ms", None)
+        if hint is not None:
+            agg["resume_ts_hint"] = hint
+        else:
+            agg.pop("resume_ts_hint", None)
+        agg["count"], agg["sent"], agg["matched"] = count, sent, matched
+        if limits is not None:
+            agg["limits"] = limits
+        return agg
+
+    async def _finish_recovery(self, last_end: Optional[Dict[str, Any]]) -> None:
         r = self._recovery
         if r is None:
             return
         self._recovery = None
+        end = self._aggregate_ends(r, last_end)
+        # Subscriptions whose own replay_end was incomplete and retryable (or,
+        # on a server that does not say, incomplete): the automatic retry asks only for them.
+        retry_subs = [sid for sid, e in r.ends.items() if e.get("complete") is False and e.get("retryable") is not False]
         reasons: List[str] = []
         # Reasons of the channels the server reported incomplete, with their retryability.
         channel_reasons: List[str] = []
@@ -562,7 +814,8 @@ class RobinhoodStream:
         gap_channels: Dict[str, Any] = {}
         # A v1 server answers with complete/sent/matched; an older one with count only.
         v1 = end is not None and any(k in end for k in ("complete", "sent", "matched"))
-        if (r.start or {}).get("replay_truncated") is True or (end or {}).get("replay_truncated") is True:
+        if (r.start or {}).get("replay_truncated") is True or (end or {}).get("replay_truncated") is True \
+                or any(s.get("replay_truncated") is True for s in r.starts.values()):
             reasons.append("ring_truncated")
         if end is None:
             reasons.append("replay_timeout")
@@ -618,6 +871,9 @@ class RobinhoodStream:
             "resume_reason": end.get("resume_reason") if end is not None and isinstance(end.get("resume_reason"), str) else None,
             "start": r.start,
             "end": end,
+            # The subscriptions this recovery covered and their raw replay_end frames.
+            "subscriptions": list(r.ends) if r.ends else (sorted(r.pending) if r.pending else [DEFAULT_SUB_ID]),
+            "ends": dict(r.ends),
         }
         # Final vs retryable. The server says which (``retryable``): True only
         # when an incomplete channel's reason is transient (backpressure, closed,
@@ -702,7 +958,8 @@ class RobinhoodStream:
         elif retryable:
             self._unsafe = True
             if server_says:
-                self._schedule_resume_retry(retry_after_ms, resume_ts_hint if cap_only else None)
+                self._schedule_resume_retry(retry_after_ms, resume_ts_hint if cap_only else None,
+                                            retry_subs or None)
         else:
             # strict: stop instead of skipping what cannot be recovered.
             self._unsafe = True
@@ -711,10 +968,12 @@ class RobinhoodStream:
         for f in r.held:
             await self._deliver(f)
 
-    def _schedule_resume_retry(self, retry_after_ms: Optional[float], hint_ts: Optional[float]) -> None:
+    def _schedule_resume_retry(self, retry_after_ms: Optional[float], hint_ts: Optional[float],
+                               only: Optional[List[str]] = None) -> None:
         """A retryable gap: ask the server again on this connection after its
-        retry_after_ms (row_cap resumes from resume_ts_hint). Bounded — the next
-        reconnect resumes anyway."""
+        retry_after_ms (row_cap resumes from resume_ts_hint), for the
+        subscriptions in ``only`` (all when None). Bounded — the next reconnect
+        resumes anyway."""
         if self._retry_at is not None or not self._cursor:
             return
         if self._resume_retries >= self.max_resume_retries:
@@ -725,6 +984,7 @@ class RobinhoodStream:
         if hint_ts is not None and hint_ts > frm["ts"]:
             frm["ts"] = hint_ts
         self._retry_from = frm
+        self._retry_only = only
         self._retry_at = asyncio.get_running_loop().time() + delay
 
     async def _emit(self, event: str, data: Any, evt: Optional[dict] = None) -> None:
@@ -761,7 +1021,7 @@ class RobinhoodStream:
         if mtype == "connected":
             if isinstance(msg.get("instance"), str):
                 self._server_instance = msg["instance"]
-            if not self._channels:
+            if not self._channels and not self._named:
                 self._attempt = 0
                 self._auth_failures = 0
             return
@@ -774,37 +1034,91 @@ class RobinhoodStream:
             if r is not None and r.suppress_ack:
                 r.suppress_ack = False  # ack of our own fallback subscribe
                 return
-            await self._emit("subscribed", msg.get("channels"))
+            # Acks arrive in the order the subscribes were sent: a named subscribe
+            # answered WITHOUT sub_id means the server ignores sub_id (older
+            # deployment) — every subscription then collapsed into one on the
+            # server. Said once, never silently.
+            expected = self._ack_expect.pop(0) if self._ack_expect else DEFAULT_SUB_ID
+            # The subscription this ack is about: the server's sub_id, else the
+            # one we sent in this position (an older server echoes none).
+            acked_id = msg["sub_id"] if isinstance(msg.get("sub_id"), str) and msg["sub_id"] else expected
+            if expected != DEFAULT_SUB_ID and not isinstance(msg.get("sub_id"), str):
+                if not self._named_unsupported_warned:
+                    self._named_unsupported_warned = True
+                    await self._surface_warning({
+                        "type": "warning", "code": "named_subscriptions_unsupported", "sub_id": expected,
+                        "message": "The server ignored sub_id: it predates named subscriptions, so every subscription "
+                                   "on this connection shares one channel set and one filter object.",
+                    })
+                # Such a server runs ONE replay for the whole connection and
+                # reports it without sub_id ("default"): every named id must
+                # leave `pending` or the recovery would never finish and the
+                # cursor would freeze.
+                if r is not None:
+                    await self._collapse_pending(r)
+            await self._emit("subscribed", msg.get("channels"), msg)
             if r is not None and r.protocol == "detect" and not r.acked:
                 r.acked = True
-                echo = msg.get("resume")
-                if isinstance(echo, dict) and echo.get("accepted") is False:
-                    # Refused (e.g. replay_in_progress): no replay follows and this
-                    # is a v1 server — no waiting, no legacy fallback. The server's
-                    # own warning frame explains why. Nothing was recovered, so the
-                    # committed cursor must not move until a later recovery completes.
-                    self._recovery = None
-                    self._unsafe = True
-                elif "resume" in msg:
+                if "resume" in msg:
                     r.protocol = "resume"  # server echoed resume: it understood
                 else:
                     r.deadline = asyncio.get_running_loop().time() + self.resume_detect
+            echo = msg.get("resume")
+            if r is not None and isinstance(echo, dict) and echo.get("accepted") is False:
+                # Refused for THIS subscription (replay_in_progress: it already has
+                # a replay running or queued): no replay_end will come for it. When
+                # nothing at all was accepted, nothing was recovered, so the
+                # committed cursor must not move until a later recovery completes.
+                r.pending.discard(acked_id)
+                if not r.pending and not r.ends:
+                    self._recovery = None
+                    self._unsafe = True
+                elif not r.pending and r.protocol != "detect":
+                    await self._finish_recovery(next(reversed(r.ends.values())) if r.ends else None)
             return
         if mtype == "replay_start":
             r = self._recovery
             if r is None:
-                r = self._recovery = _Recovery("resume", None, [], {})
+                r = self._recovery = _Recovery("resume", None, [], {}, pending={_sub_id_of(msg)})
                 r.acked = True
             if r.protocol == "detect":
                 r.protocol = "resume"
                 r.deadline = None
-            r.start = msg
+            r.starts[_sub_id_of(msg)] = msg
+            if r.start is None:
+                r.start = msg
             return
         if mtype == "replay_end":
-            await self._finish_recovery(msg)
+            r = self._recovery
+            if r is None:
+                return
+            sid = _sub_id_of(msg)
+            r.ends[sid] = msg
+            r.pending.discard(sid)
+            # Every subscription's replay has ended (a legacy server answers
+            # once, for the whole connection) -> aggregate and commit.
+            if not r.pending or r.protocol == "legacy":
+                await self._finish_recovery(msg)
+            return
+        if mtype == "updated":
+            await self._emit("updated", msg)
+            return
+        if mtype == "unsubscribed":
+            await self._emit("unsubscribed", msg)
+            return
+        if mtype == "subscriptions":
+            raw_list = msg.get("list") if isinstance(msg.get("list"), list) else []
+            answer = [{
+                "sub_id": s.get("sub_id") if isinstance(s.get("sub_id"), str) else DEFAULT_SUB_ID,
+                "channels": list(s.get("channels") or []),
+                "filters": dict(s.get("filters") or {}),
+            } for s in raw_list if isinstance(s, dict)]
+            self._settle_list_waiters(answer)
             return
         if mtype == "warning":
-            if msg.get("code") == "channels_revoked":
+            sid = msg.get("sub_id") if isinstance(msg.get("sub_id"), str) else None
+            code = msg.get("code")
+            if code == "channels_revoked":
                 # The server dropped these (e.g. plan downgrade): stop re-subscribing them.
                 names = [c for c in (msg.get("channels") or []) if isinstance(c, str)]
                 for x in msg.get("revoked") or []:
@@ -812,8 +1126,20 @@ class RobinhoodStream:
                         names.append(x)
                     elif isinstance(x, dict) and isinstance(x.get("channel"), str):
                         names.append(x["channel"])
-                for c in names:
-                    self._channels.discard(c)
+                if sid and sid != DEFAULT_SUB_ID:
+                    entry = self._named.get(sid)
+                    if entry is not None:
+                        for c in names:
+                            entry["channels"].discard(c)
+                        if not entry["channels"]:
+                            self._named.pop(sid, None)
+                else:
+                    for c in names:
+                        self._channels.discard(c)
+            elif code in ("too_many_subscriptions", "invalid_sub_id") and sid and sid != DEFAULT_SUB_ID:
+                # The server will refuse it on every reconnect too: forget it, and do not wait for its replay.
+                self._named.pop(sid, None)
+                self._forget_pending(sid)
             await self._surface_warning(msg)
             return
         if not (msg.get("channel") and msg.get("event")):
@@ -848,7 +1174,9 @@ class RobinhoodStream:
         raw_id = msg.get("id")
         fid = str(raw_id) if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) else None
         if fid is not None and self.dedupe_size > 0:
-            key = f"{msg.get('channel')}\x00{fid}"
+            # Dedupe is per (sub_id, channel, id): the same event delivered under
+            # two named subscriptions is two legitimate deliveries.
+            key = f"{_sub_id_of(msg)}\x00{msg.get('channel')}\x00{fid}"
             if key in self._seen:
                 self._seen.move_to_end(key)
                 if in_replay and self._recovery is not None:
