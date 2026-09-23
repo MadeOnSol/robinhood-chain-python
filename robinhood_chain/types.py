@@ -169,15 +169,17 @@ class TradesResponse(TypedDict, total=False):
 
 
 class LpEvent(TypedDict, total=False):
-    """One liquidity REMOVAL from ``GET /rhc/lp-events``.
+    """One liquidity event from ``GET /rhc/lp-events``.
 
-    Every row is ``event == "remove"`` — adds are not persisted. Amounts are
-    raw on-chain uint256 integers as decimal **strings**; v4 rows carry
-    ``liquidity`` only (the pool manager emits no token amounts), so
-    ``amount0`` / ``amount1`` / ``token_amount_raw`` are ``None`` there.
+    Without ``action`` every row is ``event == "remove"`` (the default feed is
+    removals only); ``action="add"|"pool_created"|"all"`` opts into adds (kept
+    7 days) and pool creations (2026-09-23). Amounts are raw on-chain uint256
+    integers as decimal **strings**; v4 rows carry ``liquidity`` only (the pool
+    manager emits no token amounts), so ``amount0`` / ``amount1`` /
+    ``token_amount_raw`` are ``None`` there.
     """
 
-    event: str  # always "remove"
+    event: str  # "remove" (default) | "add" | "pool_created"
     pool: str
     dex: str  # uniswap-v2 | uniswap-v3 | uniswap-v4
     fee_tier: Optional[int]
@@ -202,14 +204,25 @@ class LpEvent(TypedDict, total=False):
     block_time: str  # exact block header timestamp (ISO 8601)
     tx_hash: str
     log_index: int
+    # Depth fields (2026-09-23) — None where the pool state was unknown and on older rows.
+    tick_lower: Optional[int]  # v3/v4 position range; None on v2 (full range)
+    tick_upper: Optional[int]
+    liquidity_delta: Optional[str]  # signed, int256 as str
+    in_range: Optional[bool]  # tick_lower <= tick < tick_upper just before the event
+    active_liquidity_delta: Optional[str]  # liquidity_delta in range, "0" out of range
+    active_share: Optional[float]  # |active delta| / active L before (v3/v4); adds can exceed 1
+    share_of_reserves: Optional[float]  # v2 only, from the pair's Sync
+    material: Optional[bool]  # a removal of >= 25 % of reserves / active liquidity
 
 
 class LpEventsCoverage(TypedDict, total=False):
-    """Honesty block on ``LpEventsResponse``: ``events == ["remove"]``,
-    ``adds_persisted == False``."""
+    """Honesty block on ``LpEventsResponse``: ``events`` = the actions this
+    response covers (``["remove"]`` by default), ``adds_persisted``,
+    ``adds_retention_days``."""
 
     events: List[str]
-    adds_persisted: bool
+    adds_persisted: Optional[bool]  # None when the probe failed
+    adds_retention_days: int
     note: str
     since: str
 
@@ -221,6 +234,79 @@ class LpEventsResponse(TypedDict, total=False):
     has_more: bool
     next_before: Optional[str]  # opaque cursor — pass back as before=
     coverage: LpEventsCoverage
+
+
+# ── WS rhc:lp_events / rhc:token_locks lifecycle (2026-09-23) ──
+
+
+class RhcLpStreamEvent(TypedDict, total=False):
+    """``rhc:lp_event`` frame data (channel ``rhc:lp_events``, ULTRA+).
+
+    Frame id ``rhc:lp_event:<tx_hash>:<log_index>``. Every key is present
+    (None when unknown). ``in_range`` / ``active_*`` are None with
+    ``active_share_reason == "pool_state_unknown"`` when the pool's tick was
+    not known — never guessed. ``amount0`` / ``amount1`` are None on v4.
+    ``provider`` is usually a router / position manager, not the beneficial
+    owner. No USD field.
+    """
+
+    chain: str
+    action: str  # add | remove | pool_created
+    dex: str  # uniswap-v2 | uniswap-v3 | uniswap-v4
+    pool: str  # address (v2/v3) or bytes32 poolId (v4)
+    token_address: Optional[str]
+    token: Dict[str, Any]  # {address, symbol (<= 32 code points), decimals}
+    token0: Optional[str]
+    token1: Optional[str]
+    provider: Optional[str]
+    liquidity: Optional[str]
+    amount0: Optional[str]
+    amount1: Optional[str]
+    tick_lower: Optional[int]
+    tick_upper: Optional[int]
+    liquidity_delta: Optional[str]
+    in_range: Optional[bool]
+    active_liquidity_delta: Optional[str]
+    active_share: Optional[float]
+    active_share_reason: Optional[str]  # pool_created | not_concentrated | pool_state_unknown | no_active_liquidity
+    share_of_reserves: Optional[float]
+    material: Optional[bool]  # removal >= 25 %; None for adds / creations / unknown shares
+    block_number: Optional[int]
+    block_time: Optional[str]
+    tx_hash: str
+    log_index: Optional[int]
+
+
+class RhcTokenUnlockScheduleEvent(TypedDict, total=False):
+    """``rhc:token_unlock_upcoming`` (an unlock within 24 h) /
+    ``rhc:token_unlock_available`` (passed within 30 min — claimable per the
+    schedule, NOT claimed) on ``rhc:token_locks`` with
+    ``filters={"lifecycle": True}``. Frame id ``<event>:<event_key>``."""
+
+    event_key: str  # <lock_id>:<type>:<unlock epoch s>
+    lock_id: str
+    token_address: str
+    family: str
+    observed_at: Optional[str]
+    unlock_at: str
+    unlock_kind: str  # cliff | final | tranche
+    amount_raw: Optional[str]
+    amount_reason: Optional[str]  # e.g. position_nft_no_token_amount
+    unlocked_total_raw: Optional[str]
+    release_model: str  # at_end | linear | tranched
+    claimable: bool  # only on rhc:token_unlock_available
+    chain: str
+    locker: Optional[str]
+    kind: Optional[str]
+    subject: Optional[str]
+    lp_kind: Optional[str]
+    lp_pool: Optional[str]
+    sender: Optional[str]
+    recipient: Optional[str]
+    locked_amount_raw: Optional[str]
+    amount_unit: Optional[str]
+    decimals: Optional[int]  # None for LP locks
+    withdrawals_tracked: bool  # always False on RHC
 
 
 # ── /rhc/tokens ──

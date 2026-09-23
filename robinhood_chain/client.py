@@ -877,6 +877,7 @@ class RobinhoodClient:
         provider: Optional[str] = None,
         dex: Optional[str] = None,
         before: Optional[str] = None,
+        action: Optional[str] = None,
     ) -> t.LpEventsResponse:
         """Liquidity REMOVALS feed — the rug signal (PRO+).
 
@@ -903,6 +904,12 @@ class RobinhoodClient:
             dex: ``'uniswap-v2'`` | ``'uniswap-v3'`` | ``'uniswap-v4'``.
             before: Opaque cursor — pass ``next_before`` from the previous
                 response (same (block_time, id) keyset as :meth:`trades`).
+            action: ``'remove'`` (server default — the removals-only feed,
+                unchanged) | ``'add'`` (kept 7 days) | ``'pool_created'`` |
+                ``'all'``. Adds and pool creations are persisted since
+                2026-09-23; every row also carries the depth fields
+                (``in_range``, ``active_share``, ``share_of_reserves``,
+                ``material``, …). Live push: WS ``rhc:lp_events`` (ULTRA+).
 
         Route: ``GET /api/v1/rhc/lp-events``. Tier: PRO+. Alias
         ``GET /rhc/tokens/{address}/lp-events`` is the same feed with
@@ -916,6 +923,7 @@ class RobinhoodClient:
                 "pool": pool,
                 "provider": provider,
                 "dex": dex,
+                "action": action,
                 "before": before,
             },
         )

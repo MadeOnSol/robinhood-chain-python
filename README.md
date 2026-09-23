@@ -134,7 +134,7 @@ Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 he
 | Method | Route | Tier |
 |---|---|---|
 | `client.trades(limit=, token=, dex=, action=, min_eth=, before=)` | `GET /api/v1/rhc/trades` | PRO+ |
-| `client.lp_events(limit=, token=, pool=, provider=, dex=, before=)` — liquidity **removals** only (v2/v3 `Burn` + v4 negative `ModifyLiquidity`; `coverage["adds_persisted"]` is `False`), raw uint256 string amounts, `provider_is_token_deployer` = rug tell | `GET /api/v1/rhc/lp-events` | PRO+ |
+| `client.lp_events(limit=, token=, pool=, provider=, dex=, before=, action=)` — liquidity **removals** by default (v2/v3 `Burn` + v4 negative `ModifyLiquidity`); `action="add"\|"pool_created"\|"all"` opts into adds (kept 7 days) and pool creations (server 2026-09-23), rows carry `in_range` / `active_share` / `share_of_reserves` / `material`; raw uint256 string amounts, `provider_is_token_deployer` = rug tell | `GET /api/v1/rhc/lp-events` | PRO+ |
 | `client.tokens(limit=, sort=, min_mc_usd=, min_liquidity_usd=, launchpad=)` | `GET /api/v1/rhc/tokens` | PRO+ |
 | `client.equities(sort=, limit=, symbol=, q=)` — every official Robinhood tokenized stock/ETF; identity = issuer **beacon**, never the name; live price / MC / liquidity + 24h trades / ETH volume / buyers vs sellers; `sort` volume\|trades\|market_cap\|last_trade\|symbol, `limit` ≤ 300 | `GET /api/v1/rhc/equities` | BASIC |
 | `client.token(address)` | `GET /api/v1/rhc/tokens/{address}` | BASIC |
@@ -534,7 +534,7 @@ async def main():
 asyncio.run(main())
 ```
 
-All ten RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
+All eleven RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/stream`). Unlike Solana, the RHC DEX firehose has **no separate endpoint** — it is the `rhc:dex_trades` channel here. The stream token itself is PRO+.
 
 | Channel | What it delivers (event names) | Tier |
 |---|---|---|
@@ -546,7 +546,8 @@ All ten RHC channels ride the main stream endpoint (`wss://madeonsol.com/ws/v1/s
 | `rhc:price_alert:events` | Your price-alert dips/recoveries, user-scoped (`rhc:price_alert:dip` / `rhc:price_alert:recovery`) — event-driven off each RHC trade (a few seconds), **not** sub-second | PRO+ |
 | `rhc:kol:coordination` | Coordination-alert fires (`rhc:kol:coordination`) | PRO+ |
 | `rhc:kol:first_touches` | Broadcast first-touch feed (`rhc:kol:first_touch`) — the **channel** is PRO+; ULTRA gates the first-touch *subscription* CRUD endpoints, not this broadcast | PRO+ |
-| `rhc:token_locks` | A token lock / vesting contract created on chain (`rhc:token_lock`) | PRO+ |
+| `rhc:token_locks` | A token lock / vesting contract created on chain (`rhc:token_lock`); with `filters={"lifecycle": True}` also the unlock schedule (`rhc:token_unlock_upcoming` / `rhc:token_unlock_available`) | PRO+ |
+| `rhc:lp_events` | Liquidity `add` / `remove` / `pool_created` on tracked Uniswap v2/v3/v4 pools with `in_range`, `active_share`, `share_of_reserves`, `material` (`rhc:lp_event`, `types.RhcLpStreamEvent`); durable resume | **ULTRA+** |
 | `rhc:token_prices` | Per-token price ticks for the addresses you name (`rhc:token_price`) — **address-scoped**: subscribe with `filters={"addresses": [...]}` (25 / 100 / 250 per connection); one `snapshot: True` frame per address, then at most one tick per address per 250 ms, each with `quality` fresh / stale / unreliable and `quality_reason`; no `seq` / `id` | PRO+ |
 
 Lifecycle events: `open`, `close`, `reconnect`, `subscribed`, `heartbeat`, `warning`, `cursor`, `replay`, `gap`, `fatal`, `error`, plus `"*"` for every data event. Deprecated spelling: the server accepts `rhc:trades` as an alias of `rhc:dex_trades` (some 0.4.0 SDKs shipped it); this SDK uses only canonical names.
@@ -599,6 +600,24 @@ def on_event(data, evt):
 
 stream.update_subscription("kol-buys", {"action": "buy"})
 stream.unsubscribe("firehose")
+await stream.run()
+```
+
+### Liquidity events and the lock schedule *(server 2026-09-23)*
+
+`rhc:lp_events` (ULTRA+) delivers every committed liquidity event on tracked pools: raw `amount0` / `amount1` strings (`None` on v4 — ModifyLiquidity reports none), the position range, and for v3/v4 `in_range` / `active_liquidity_delta` / `active_share` — a share of liquidity **at the current price**, not of TVL, so an out-of-range removal is `active_share == 0`. v2 carries `share_of_reserves`. `material` is `True` for a removal of ≥ 25 %. When the pool's tick was not known, `in_range` and the active fields are `None` with `active_share_reason == "pool_state_unknown"` — never guessed. `provider` is usually a router / position manager, not the beneficial owner. No USD field. Filters (all optional, AND): `addresses`, `pools`, `dexes`, `actions`, `material_only`, `min_share`; an invalid value rejects the channel instead of widening it.
+
+On `rhc:token_locks`, `filters={"lifecycle": True}` adds `rhc:token_unlock_upcoming` (an unlock within 24 h) and `rhc:token_unlock_available` (passed within 30 min — **claimable per the schedule, not claimed**). Claims, extensions and cancels are not observable on Robinhood Chain; every frame says `withdrawals_tracked: False`. The REST feed matches: `client.lp_events(action="add" | "pool_created" | "all")` (default: removals only).
+
+```python
+stream = client.stream()
+stream.subscribe(["rhc:lp_events"], {"actions": ["remove"], "material_only": True}, sub_id="rugs")
+stream.subscribe(["rhc:token_locks"], {"lifecycle": True, "events": ["rhc:token_unlock_upcoming"]}, sub_id="unlocks")
+
+@stream.on("rhc:lp_event")
+def on_lp(data, evt):
+    print(data["dex"], data["pool"], data["action"], data.get("active_share"), data.get("share_of_reserves"))
+
 await stream.run()
 ```
 

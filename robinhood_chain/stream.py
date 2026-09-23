@@ -56,6 +56,17 @@ from urllib.parse import quote
 #                                 one snapshot frame per address (snapshot=True)
 #                                 then <= 1 tick / address / 250 ms, each with
 #                                 quality fresh | stale | unreliable + reason  (PRO+)
+#   rhc:lp_events               - liquidity add / remove / pool_created on
+#                                 tracked Uniswap v2/v3/v4 pools with in_range,
+#                                 active_share, share_of_reserves, material
+#                                 (types.RhcLpStreamEvent); filters addresses,
+#                                 pools, dexes, actions, material_only,
+#                                 min_share; durable resume (2026-09-23)       (ULTRA+)
+# rhc:token_locks with filters={"lifecycle": True} also delivers the unlock
+# SCHEDULE: rhc:token_unlock_upcoming (an unlock within 24 h) and
+# rhc:token_unlock_available (passed within 30 min — claimable per the
+# schedule, NOT claimed; types.RhcTokenUnlockScheduleEvent). RHC claims,
+# extensions and cancels are not observable (withdrawals_tracked False).
 CHANNELS = (
     "rhc:kol_trades",
     "rhc:dex_trades",
@@ -67,6 +78,7 @@ CHANNELS = (
     "rhc:kol:first_touches",
     "rhc:token_locks",
     "rhc:token_prices",
+    "rhc:lp_events",
 )
 
 # Deprecated spellings the server still accepts (acked under the canonical
@@ -85,7 +97,10 @@ EVENT_NAMES = (
     "rhc:kol:coordination",
     "rhc:kol:first_touch",
     "rhc:token_lock",
+    "rhc:token_unlock_upcoming",   # on rhc:token_locks with filters["lifecycle"] = True
+    "rhc:token_unlock_available",  # same; claimable per the schedule, NOT claimed
     "rhc:token_price",  # on rhc:token_prices; the frame's snapshot=True marks the per-address snapshot
+    "rhc:lp_event",     # on rhc:lp_events (ULTRA+)
 )
 
 # ── Shared stream core ─────────────────────────────────────────────────────
