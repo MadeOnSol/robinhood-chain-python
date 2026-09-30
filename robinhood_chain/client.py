@@ -27,6 +27,10 @@ import httpx
 
 from .payment_policy import PaymentBudget, PaymentPolicy, PaymentPolicyError, payment_origin
 from .errors import RobinhoodError, error_for_status
+from .x402_recovery import (
+    RecoveryOptions, X402PaymentError, _Plan, error_from_response, paid_result_provenance,
+    payment_id_from_proof, run_async, run_sync, sign_recovery_evm, x402_request_hash,
+)
 from . import types as t
 
 # Derive the User-Agent version from the installed package metadata (the single
@@ -166,6 +170,7 @@ class RobinhoodClient:
         timeout: float = 30.0,
         max_retries: int = 2,
         payment_policy: Optional[PaymentPolicy] = None,
+        recovery: Optional[RecoveryOptions] = None,
     ) -> None:
         self.auth_mode = "key" if api_key else ("x402" if private_key else None)
         self._payment_budget = None
@@ -174,6 +179,12 @@ class RobinhoodClient:
         self._private_key: Optional[str] = None
         #: Decoded PAYMENT-RESPONSE of the last paid call (keyless mode).
         self.last_payment: Optional[Dict[str, Any]] = None
+        #: PAY-05 provenance of the last paid answer (payment_id, origin
+        #: original|deferred, source live|stored, paid_at, generated_at, sha256,
+        #: attempts). A ``deferred`` answer was produced AFTER the payment.
+        self.last_paid_result: Optional[Dict[str, Any]] = None
+        #: Bounds of PAY-05 recovery (same proof + PAYMENT-RECOVERY, never a new payment).
+        self._recovery = recovery or RecoveryOptions()
         if self.auth_mode is None:
             import sys
 
@@ -348,6 +359,66 @@ class RobinhoodClient:
         except Exception:  # noqa: BLE001
             self.last_payment = None
 
+    # ── PAY-05 recovery of a sent proof ─────────────────────────────────────
+
+    def _recovery_plan(self, payment: str, request_url: str) -> _Plan:
+        account = self._signer()
+        return _Plan(self._recovery, lambda message: sign_recovery_evm(account, message),
+                     payment_id_from_proof("rhc", payment), x402_request_hash("GET", request_url))
+
+    def _paid_outcome(self, resp: httpx.Response, pending: bool, label: str, plan: _Plan, counter, resume) -> Any:
+        self._capture_payment(resp)
+        self._capture_rate_limit(resp)
+        self.last_paid_result = paid_result_provenance(resp.headers, counter[0], tuple(plan.ids))
+        if not resp.is_success:
+            raise error_from_response(
+                resp.status_code, resp.headers, resp.text,
+                f"x402 payment for {label} rejected (HTTP {resp.status_code}): {resp.text[:400]}",
+                tuple(plan.ids), resume=resume if pending else None,
+            )
+        return resp.json()
+
+    def _send_paid_sync(self, path: str, url: str, clean, headers: Dict[str, str], request_url: str) -> Any:
+        """Send the signed proof; recover a lost/pending answer with the SAME proof."""
+        plan = self._recovery_plan(headers["PAYMENT-SIGNATURE"], request_url)
+        counter = [0]
+
+        def send(h):
+            return httpx.get(url, params=clean, headers=h, timeout=self.timeout, follow_redirects=False)
+
+        def drive(start_with_header: bool) -> Any:
+            try:
+                resp, pending = run_sync(send, headers, plan, counter, start_with_header)
+            except X402PaymentError as err:
+                err.resume = lambda: drive(True)
+                raise
+            return self._paid_outcome(resp, pending, path, plan, counter, lambda: drive(True))
+
+        return drive(False)
+
+    async def _send_paid_async(self, http: httpx.AsyncClient, label: str, url: str, clean,
+                               headers: Dict[str, str], request_url: str) -> Any:
+        plan = self._recovery_plan(headers["PAYMENT-SIGNATURE"], request_url)
+        counter = [0]
+
+        async def drive(client: Optional[httpx.AsyncClient], start_with_header: bool) -> Any:
+            async def run(c: httpx.AsyncClient):
+                async def send(h):
+                    return await c.get(url, params=clean, headers=h, timeout=self.timeout)
+                return await run_async(send, headers, plan, counter, start_with_header)
+            try:
+                if client is not None:
+                    resp, pending = await run(client)
+                else:
+                    async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as fresh:
+                        resp, pending = await run(fresh)
+            except X402PaymentError as err:
+                err.resume = lambda: drive(None, True)
+                raise
+            return self._paid_outcome(resp, pending, label, plan, counter, lambda: drive(None, True))
+
+        return await drive(http, False)
+
     @property
     def authorized_amount_atomic(self) -> int:
         """Reserved plus signer-attempted USDG units; not settled on-chain spend."""
@@ -423,12 +494,10 @@ class RobinhoodClient:
             # The deadline bounds everything up to SUBMISSION. Once the signed
             # payment is sent it may settle, so its response (data + receipt) is
             # always read and captured, never discarded for arriving late.
-            resp = httpx.get(url, params=clean, headers=headers, timeout=self.timeout, follow_redirects=False)
-            self._capture_payment(resp)
-            self._capture_rate_limit(resp)
-            if not resp.is_success:
-                raise RobinhoodError(f"x402 payment for {path} rejected (HTTP {resp.status_code}): {resp.text[:400]}")
-            return resp.json()
+            # PAY-05: a lost/pending answer is recovered with THIS proof and a
+            # fresh EIP-191 PAYMENT-RECOVERY signature — never a new payment and
+            # never a new budget reservation.
+            return self._send_paid_sync(path, url, clean, headers, request_url)
         finally:
             reservation.release()
 
@@ -469,12 +538,7 @@ class RobinhoodClient:
                 if int(time.time()) >= signing_started + leg["maxTimeoutSeconds"]:
                     raise PaymentPolicyError("Payment authorization expired before submission")
                 headers = {**self._headers, "PAYMENT-SIGNATURE": payment}
-                resp = await http.get(url, params=clean, headers=headers, timeout=self.timeout)
-                self._capture_payment(resp)
-                self._capture_rate_limit(resp)
-                if not resp.is_success:
-                    raise RobinhoodError(f"x402 payment for {url} rejected (HTTP {resp.status_code}): {resp.text[:400]}")
-                return resp.json()
+                return await self._send_paid_async(http, url, url, clean, headers, request_url)
             finally:
                 reservation.release()
 

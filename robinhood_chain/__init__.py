@@ -6,6 +6,7 @@ from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 from .client import RobinhoodClient, NULL, KeylessNotAvailableError, KEYLESS_ENDPOINTS
 from .payment_policy import PaymentPolicy, PaymentPolicyError
+from .x402_recovery import RecoveryOptions, X402PaymentError
 from .errors import (
     RobinhoodError,
     RobinhoodAPIError,
@@ -22,6 +23,8 @@ __all__ = [
     "RobinhoodClient",
     "PaymentPolicy",
     "PaymentPolicyError",
+    "RecoveryOptions",
+    "X402PaymentError",
     "KeylessNotAvailableError",
     "KEYLESS_ENDPOINTS",
     "RobinhoodStream",
