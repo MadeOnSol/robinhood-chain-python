@@ -1,7 +1,7 @@
 """Robinhood Chain API client (EVM-native, chain id 4663).
 
-``RobinhoodClient`` is a thin, typed wrapper over the 54 operations (40 GET,
-6 POST, 4 PATCH, 4 DELETE) under
+``RobinhoodClient`` is a thin, typed wrapper over every Robinhood Chain
+operation (GET / POST / PATCH / DELETE) under
 ``https://madeonsol.com/api/v1/rhc/*``, plus the shared WebSocket streaming
 surface (``POST /stream/token`` and the managed :meth:`RobinhoodClient.stream`
 client). Auth is a Bearer ``msk_`` API key — the
@@ -716,6 +716,13 @@ class RobinhoodClient:
         action: Optional[str] = None,
         kol: Optional[str] = None,
         min_eth: Optional[float] = None,
+        cursor: Optional[str] = None,
+        exclude_sells: Optional[bool] = None,
+        min_mc_usd: Optional[float] = None,
+        max_mc_usd: Optional[float] = None,
+        token_age_max_min: Optional[int] = None,
+        min_kol_winrate: Optional[float] = None,
+        strategy: Optional[str] = None,
     ) -> t.KolFeedResponse:
         """Real-time KOL trade feed on Robinhood Chain (BASIC+).
 
@@ -732,6 +739,22 @@ class RobinhoodClient:
             action: Filter to ``'buy'`` or ``'sell'``.
             kol: Filter to one KOL by EVM wallet (``0x`` + 40 hex).
             min_eth: Minimum trade size in ETH.
+            cursor: PREFERRED pagination — ``next_cursor`` from the previous
+                page (strict keyset; no skipped/repeated rows at shared
+                timestamps). Cannot be combined with ``before``.
+            exclude_sells: Alias for ``action='buy'``; ignored when ``action``
+                is set.
+            min_mc_usd: Only trades where the token's MC at trade time was at
+                least this (USD).
+            max_mc_usd: Only trades where the token's MC at trade time was at
+                most this (USD). Must be >= ``min_mc_usd``.
+            token_age_max_min: Only tokens first seen at most this many minutes
+                ago (1–43200). Unknown first-seen is excluded.
+            min_kol_winrate: Only KOLs whose 7-day win rate (closed positions
+                only) is at least this (0–1). Unscored KOLs are dropped, so
+                ``0`` means "scored", not "everyone".
+            strategy: KOL hold-time bucket — ``'scalper'`` | ``'day_trader'`` |
+                ``'swing'`` | ``'inactive'`` | ``'unscored'`` (RHC-specific).
 
         Route: ``GET /api/v1/rhc/kol/feed``. Tier: BASIC.
         """
@@ -740,9 +763,16 @@ class RobinhoodClient:
             {
                 "limit": limit,
                 "before": before,
+                "cursor": cursor,
                 "action": action,
                 "kol": kol,
                 "min_eth": min_eth,
+                "exclude_sells": exclude_sells,
+                "min_mc_usd": min_mc_usd,
+                "max_mc_usd": max_mc_usd,
+                "token_age_max_min": token_age_max_min,
+                "min_kol_winrate": min_kol_winrate,
+                "strategy": strategy,
             },
         )
 
@@ -833,6 +863,7 @@ class RobinhoodClient:
         launchpad: Optional[str] = None,
         min_mc_usd: Optional[float] = None,
         max_mc_usd: Optional[float] = None,
+        cursor: Optional[str] = None,
     ) -> t.FirstTouchesResponse:
         """Earliest KOL entry per token on Robinhood Chain (BASIC+).
 
@@ -858,6 +889,9 @@ class RobinhoodClient:
                 noxa, virtuals).
             min_mc_usd: Minimum market cap at first buy (USD).
             max_mc_usd: Maximum market cap at first buy (USD).
+            cursor: PREFERRED pagination — ``next_cursor`` from the previous
+                page (strict (first_buy_at, id) keyset). Cannot be combined
+                with ``before``.
 
         Route: ``GET /api/v1/rhc/kol/first-touches``. Tier: BASIC.
         """
@@ -867,6 +901,7 @@ class RobinhoodClient:
                 "limit": limit,
                 "since": since,
                 "before": before,
+                "cursor": cursor,
                 "min_eth": min_eth,
                 "token_age_max_min": token_age_max_min,
                 "launchpad": launchpad,
@@ -998,6 +1033,7 @@ class RobinhoodClient:
         limit: int = 50,
         since: Optional[str] = None,
         before: Optional[str] = None,
+        cursor: Optional[str] = None,
         token: Optional[str] = None,
         sender: Optional[str] = None,
         recipient: Optional[str] = None,
@@ -1028,11 +1064,21 @@ class RobinhoodClient:
         ``subject="lp"`` / ``"all"``, and never claim usd / pct (pair units).
         Amounts are raw base units as decimal **strings**.
 
+        Provenance (2026-10-02): ``provider`` (``identity`` = ``verified`` only
+        for known provider contract addresses; ``compatible`` = ABI match, the
+        operator is NOT identified and gets no id / website / ``lock_url``),
+        ``explorer`` (Blockscout links), ``price_usd``, ``seconds_until_end``,
+        ``seconds_until_next_unlock``.
+
         Args:
             limit: 1–100 (default 50).
             since: ISO instant — only locks created after it (poll cursor =
                 ``pagination["next_since"]``).
-            before: ISO instant — page back (``pagination["next_before"]``).
+            before: ISO instant — legacy page back (``pagination["next_before"]``;
+                skips rows sharing that timestamp — prefer ``cursor``).
+            cursor: ``pagination["next_cursor"]`` from the previous page —
+                strict (created_at, id) keyset, no repeats, no skips. Not
+                combinable with ``before``.
             token, sender, recipient, locker: ``0x`` + 40-hex filters.
             family: closed enum (``pinklock`` … ``sablier``).
             kind: ``'lock'`` | ``'vesting'``.
@@ -1049,6 +1095,7 @@ class RobinhoodClient:
                 "limit": limit,
                 "since": since,
                 "before": before,
+                "cursor": cursor,
                 "token": token,
                 "sender": sender,
                 "recipient": recipient,
@@ -1147,6 +1194,12 @@ class RobinhoodClient:
         min_mc_usd: Optional[float] = None,
         min_liquidity_usd: Optional[float] = None,
         launchpad: Optional[str] = None,
+        since: Optional[str] = None,
+        after: Optional[str] = None,
+        cursor: Optional[str] = None,
+        has_pool: Optional[bool] = None,
+        asset_class: Optional[str] = None,
+        max_age_days: Optional[int] = None,
     ) -> t.TokensResponse:
         """Robinhood Chain token discovery (PRO+).
 
@@ -1156,11 +1209,27 @@ class RobinhoodClient:
         Args:
             limit: Max tokens (1–100, default 50).
             sort: ``'last_trade'`` (default) | ``'market_cap'`` |
-                ``'liquidity'`` | ``'peak_mc'`` (all descending).
+                ``'liquidity'`` | ``'peak_mc'`` (all descending) |
+                ``'newest'`` (first_seen_at DESC — the launch feed, adds
+                ``next_since``) | ``'oldest'`` (first_seen_at ASC — a resumable
+                backfill walk, adds ``next_cursor`` / ``has_more``).
             min_mc_usd: Minimum current market cap (USD).
             min_liquidity_usd: Minimum current liquidity (USD).
             launchpad: Filter by launchpad — pons, flap, clanker, hood.fun,
                 noxa, virtuals.
+            since: Only with ``sort='newest'`` — tokens first seen at or after
+                this ISO 8601 time (inclusive; dedupe on ``token_address``).
+                Feed back ``next_since`` to poll.
+            after: LEGACY, only with ``sort='oldest'`` — inclusive ISO 8601
+                lower bound. Prefer ``cursor``; cannot be combined with it.
+            cursor: Only with ``sort='oldest'`` (preferred) — ``next_cursor``
+                from the previous page; strict (first_seen_at, address) keyset.
+            has_pool: Filter on whether the token has a discovered pool.
+            asset_class: ``'equity'`` (beacon-verified Robinhood tokenized
+                stock/ETF) | ``'other'``.
+            max_age_days: Value sorts only (market_cap / liquidity / peak_mc):
+                exclude tokens whose last trade is older than this (1–365,
+                default 30).
 
         Route: ``GET /api/v1/rhc/tokens``. Tier: PRO+.
         """
@@ -1172,6 +1241,12 @@ class RobinhoodClient:
                 "min_mc_usd": min_mc_usd,
                 "min_liquidity_usd": min_liquidity_usd,
                 "launchpad": launchpad,
+                "since": since,
+                "after": after,
+                "cursor": cursor,
+                "has_pool": has_pool,
+                "asset_class": asset_class,
+                "max_age_days": max_age_days,
             },
         )
 
@@ -1231,6 +1306,7 @@ class RobinhoodClient:
         limit: int = 240,
         from_: Optional[str] = None,
         to: Optional[str] = None,
+        tf: Optional[str] = None,
     ) -> t.CandlesResponse:
         """1-minute OHLC candles on Robinhood Chain (PRO+).
 
@@ -1244,12 +1320,16 @@ class RobinhoodClient:
             from_: Lower bound on ``bucket_start`` (ISO 8601). Maps to the
                 ``from`` query param.
             to: Upper bound on ``bucket_start`` (ISO 8601).
+            tf: Timeframe — ``'1m'`` (default) | ``'5m'`` | ``'15m'`` |
+                ``'1h'`` | ``'4h'`` | ``'1d'``, rolled up server-side from the
+                1-minute series. ``truncated`` / ``covered_from`` in the
+                response report a page budget that ran out.
 
         Route: ``GET /api/v1/rhc/tokens/{address}/candles``. Tier: PRO+.
         """
         return self._get(
             f"/rhc/tokens/{address}/candles",
-            {"limit": limit, "from": from_, "to": to},
+            {"tf": tf, "limit": limit, "from": from_, "to": to},
         )
 
     def token_kol_consensus(self, address: str) -> t.KolConsensusResponse:
@@ -1376,6 +1456,34 @@ class RobinhoodClient:
             params={"window": window, "curve": curve},
         )
 
+    def token_early_buyers(
+        self, address: str, *, limit: int | None = None
+    ) -> t.EarlyBuyersResponse:
+        """The first buyers of a Robinhood Chain token, ranked, joined to the outcome (PRO+).
+
+        Each row carries ``rank``, ``wallet``, ``first_buy_at``, ``still_holding``,
+        ``position`` (``closed`` / ``open`` / ``unknown``), ``bought_eth``,
+        ``sold_eth``, ``realized_eth``, ``trades`` and ``avg_entry_mc_usd``.
+
+        ``realized_eth`` is ``sold - bought`` and is a **profit only when
+        ``position`` is ``closed``** — an open position shows a negative figure
+        because the buyer has spent and not sold. ``still_holding`` comes from
+        the same ``Transfer``-log fold as :meth:`token_holders` and is exact only
+        when ``holdings_verified`` is true. Ranks are as of ``computed_at`` (a
+        daily sweep); a token that began trading since the last run returns an
+        empty list with a ``note``, never as "no early buyers".
+
+        Args:
+            address: Token address (``0x`` + 40 hex).
+            limit: 1–20 (the ranking depth is 20 by construction). Default 20.
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/early-buyers``. Tier: PRO+.
+        """
+        return self._get(
+            f"/rhc/tokens/{address}/early-buyers",
+            params={"limit": limit},
+        )
+
     def token_risk(self, address: str) -> dict:
         """EVM-native risk assessment, computed LIVE on-chain (PRO+).
 
@@ -1402,7 +1510,12 @@ class RobinhoodClient:
         return self._get(f"/rhc/tokens/{address}/risk")
 
     def token_holders(
-        self, address: str, *, limit: int | None = None, offset: int | None = None
+        self,
+        address: str,
+        *,
+        limit: int | None = None,
+        offset: int | None = None,
+        after: str | None = None,
     ) -> dict:
         """Exact holder set and concentration for a Robinhood Chain token (PRO+).
 
@@ -1437,12 +1550,14 @@ class RobinhoodClient:
             address: Token address (``0x`` + 40 hex).
             limit: Rows to return. Capped at 50 on PRO, 200 on ULTRA/BUSINESS.
             offset: Page offset.
+            after: Keyset cursor — ``next_after`` from the previous page,
+                unchanged (preferred over ``offset``).
 
         Route: ``GET /api/v1/rhc/tokens/{address}/holders``. Tier: PRO+.
         """
         return self._get(
             f"/rhc/tokens/{address}/holders",
-            params={"limit": limit, "offset": offset},
+            params={"limit": limit, "offset": offset, "after": after},
         )
 
     def token_batch(self, addresses: Sequence[str]) -> t.TokenBatchResponse:
@@ -1572,6 +1687,7 @@ class RobinhoodClient:
         before: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        cursor: Optional[str] = None,
     ) -> t.DeployerAlertsResponse:
         """Deployer signal feed on Robinhood Chain (BASIC+).
 
@@ -1613,6 +1729,9 @@ class RobinhoodClient:
                 only ULTRA gets the full requested limit.
             offset: Page offset (0–10000, default 0). Ignored when ``before``
                 is set.
+            cursor: PREFERRED pagination — ``next_cursor`` from the previous
+                page (strict (event_at, id) keyset). Cannot be combined with
+                ``before`` or ``offset``.
 
         Route: ``GET /api/v1/rhc/deployer-hunter/alerts``. Tier: BASIC.
         """
@@ -1629,6 +1748,7 @@ class RobinhoodClient:
                 "before": before,
                 "limit": limit,
                 "offset": offset,
+                "cursor": cursor,
             },
         )
 
@@ -1666,6 +1786,7 @@ class RobinhoodClient:
         deployer_tier: Optional[str] = None,
         min_peak: Optional[float] = None,
         limit: int = 50,
+        cursor: Optional[str] = None,
     ) -> t.RecentBondsResponse:
         """Recent graduations on Robinhood Chain (BASIC+).
 
@@ -1682,6 +1803,8 @@ class RobinhoodClient:
             min_peak: Raise the peak-MC floor (USD). Never lowers it below the
                 $40K graduation milestone.
             limit: Max tokens (1–200, default 50).
+            cursor: ``next_cursor`` from the previous page — strict
+                (peak_mc_at, token_address) keyset.
 
         Route: ``GET /api/v1/rhc/deployer-hunter/recent-bonds``. Tier: BASIC.
         """
@@ -1691,6 +1814,7 @@ class RobinhoodClient:
                 "deployer_tier": deployer_tier,
                 "min_peak": min_peak,
                 "limit": limit,
+                "cursor": cursor,
             },
         )
 
@@ -1824,6 +1948,7 @@ class RobinhoodClient:
         order: Optional[str] = None,
         limit: int = 25,
         offset: int = 0,
+        include_zero_cost_dumps: Optional[bool] = None,
     ) -> t.AlphaWalletsResponse:
         """Smart-money wallet ranking on Robinhood Chain (PRO+).
 
@@ -1853,6 +1978,9 @@ class RobinhoodClient:
             order: ``'desc'`` (default) | ``'asc'``.
             limit: Page size (1–100, default 25).
             offset: Page offset (0–10000, default 0).
+            include_zero_cost_dumps: ``True`` includes wallets whose
+                ``net_eth`` / ``win_rate`` are ≥50 % inflated by zero-cost-basis
+                dumps (excluded by default — read ``zero_cost_share``).
 
         Route: ``GET /api/v1/rhc/alpha-wallets``. Tier: PRO+.
         """
@@ -1874,6 +2002,7 @@ class RobinhoodClient:
                 "order": order,
                 "limit": limit,
                 "offset": offset,
+                "include_zero_cost_dumps": include_zero_cost_dumps,
             },
         )
 
@@ -1895,6 +2024,13 @@ class RobinhoodClient:
         ``trader_eoa`` is NULL — unattributable by design, not a gap you can
         backfill. ``stats_unavailable`` is True when the snapshot timed out;
         ``flags`` still resolve in that case.
+
+        ``stats.held_value_eth``, ``open_positions`` and
+        ``top_tokens[].still_holding`` are FIFO figures (DEX buys not matched
+        by a DEX sell). Since server 2026-10-02 ``holdings`` and
+        ``top_tokens[].holding_status`` check them against the chain, so a
+        token sent away by transfer is ``TRANSFERRED_OR_DISPOSED``. A contract
+        address answers 404 with ``address_type: "contract"``.
 
         Args:
             address: Wallet EVM address (``0x`` + 40 hex). Case-insensitive.
@@ -1931,6 +2067,13 @@ class RobinhoodClient:
         Check ``positions[].liquidity_basis``: ``'v4_virtual_ceiling'`` means
         ``liquidity_usd`` is a bonding-curve ceiling, NOT withdrawable TVL, so
         do not size an exit against it.
+
+        "Open" is FIFO (DEX buys not matched by a DEX sell), not a balance.
+        Since server 2026-10-02 every position also carries
+        ``current_onchain_balance`` and ``holding_status`` (``HELD`` /
+        ``PARTIALLY_REDUCED`` / ``TRANSFERRED_OR_DISPOSED`` /
+        ``EXTERNAL_INFLOW`` / ``BALANCE_UNVERIFIED``), and
+        ``summary.holdings.verified_value_eth`` counts proven balances only.
 
         Args:
             address: Wallet EVM address (``0x`` + 40 hex).
@@ -2801,7 +2944,7 @@ class RobinhoodClient:
 class AsyncRobinhoodClient:
     """Async wrapper around :class:`RobinhoodClient`.
 
-    Each endpoint method (the 54 RHC operations plus ``stream_token``) is
+    Each endpoint method (every RHC operation plus ``stream_token``) is
     exposed as a coroutine with the same signature as its sync twin. The endpoint methods build their (path, params
     or JSON body) on the shared sync instance and dispatch through the async
     transport, so the two paths can never drift.
@@ -2855,6 +2998,7 @@ _GET_ENDPOINTS = frozenset(
         "token_top_traders",
         "token_flow",
         "token_peak_history",
+        "token_early_buyers",
         "token_risk",
         "token_holders",
         "deployer_hunter_leaderboard",

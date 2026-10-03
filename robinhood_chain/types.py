@@ -19,7 +19,43 @@ except ImportError:  # pragma: no cover - py<3.8 not supported anyway
     from typing_extensions import TypedDict  # type: ignore
 
 
+# ── shared ──
+
+
+class RhcTokenRiskSummary(TypedDict, total=False):
+    """Precomputed risk snapshot (same engine as ``/rhc/tokens/{address}/risk``).
+
+    A ``None`` risk block means NOT ASSESSED, not safe. Always read ``checked_at``.
+    """
+
+    sellable: Optional[str]  # "yes" | "no" | "unknown"; "no" = router sell-simulation REVERTED
+    upgradeable: Optional[bool]
+    score: Optional[int]  # 0–100, conservative
+    checked_at: str
+
+
+class ScanMeta(TypedDict, total=False):
+    """Present when a filter was applied after the candidate fetch (audit F09)."""
+
+    post_filtered: bool
+    scanned: int
+    scan_truncated: bool  # True ⇒ the scan budget ran out; more matches MAY exist
+    scan_budget: int
+
+
 # ── /rhc/kol/feed ──
+
+
+class KolScore(TypedDict, total=False):
+    winrate_7d: Optional[float]  # 0–1, closed positions only
+    winrate_30d: Optional[float]
+    strategy: Optional[str]  # scalper | day_trader | swing | inactive | unscored
+    closed_positions_30d: Optional[int]
+
+
+class KolFeedFilteredBy(TypedDict, total=False):
+    min_kol_winrate: Optional[float]
+    strategy: Optional[str]
 
 
 class KolFeedTrade(TypedDict, total=False):
@@ -41,20 +77,28 @@ class KolFeedTrade(TypedDict, total=False):
     current_mc_usd: Optional[float]
     peak_mc_usd: Optional[float]
     liquidity_usd: Optional[float]
+    liquidity_basis: str  # "v4_virtual_ceiling" | "measured"
+    risk: Optional[RhcTokenRiskSummary]  # None = not assessed (NOT safe)
     mc_multiple_since_trade: Optional[float]
     dex: str
     pool: Optional[str]
     tx_hash: str
     block_number: int
     traded_at: str
+    kol_score: Optional[KolScore]  # None = no score row yet, never "not looked up"
 
 
 class KolFeedResponse(TypedDict, total=False):
     chain: str
     trades: List[KolFeedTrade]
     count: int
+    filtered_by: KolFeedFilteredBy  # echo of the KOL-score filters (None = not applied)
+    matched_kols: Optional[int]  # None when neither min_kol_winrate nor strategy is set
     data_age_seconds: Optional[int]
     next_before: Optional[str]
+    next_cursor: Optional[str]  # pass as ``cursor`` for the next (older) page; None at the end
+    has_more: bool  # False only when the feed is exhausted
+    scan: ScanMeta
 
 
 # ── /rhc/kol/leaderboard ──
@@ -162,7 +206,8 @@ class TradesResponse(TypedDict, total=False):
     chain: str
     trades: List[DexTrade]
     count: int
-    next_before: Optional[str]
+    has_more: bool
+    next_before: Optional[str]  # opaque (block_time, id) cursor; None when has_more is False
 
 
 # ── /rhc/lp-events ──
@@ -455,6 +500,9 @@ class TokenRow(TypedDict, total=False):
     token_address: str
     symbol: Optional[str]
     name: Optional[str]
+    decimals: Optional[int]
+    asset_class: Optional[str]  # "equity" (beacon-verified tokenized stock/ETF) or None
+    first_seen_at: Optional[str]  # when our node first saw it trade / get a pool
     launchpad: Optional[str]
     is_graduated: Optional[bool]
     deployer_address: Optional[str]
@@ -466,6 +514,7 @@ class TokenRow(TypedDict, total=False):
     peak_mc_at: Optional[str]
     drawdown_from_peak_pct: Optional[int]
     liquidity_usd: Optional[float]
+    liquidity_basis: str  # "v4_virtual_ceiling" | "measured"
     primary_dex: Optional[str]
     primary_pool: Optional[str]
     last_trade_time: Optional[str]
@@ -476,6 +525,15 @@ class TokensResponse(TypedDict, total=False):
     tokens: List[TokenRow]
     count: int
     sort: str
+    scan: ScanMeta
+    since: Optional[str]  # sort="newest" only — echoes the request's ``since``
+    next_since: Optional[str]  # sort="newest" only — feed back as ``since``
+    note: str  # sort="newest" / "oldest" only — first_seen_at + cursor semantics
+    after: Optional[str]  # sort="oldest" only — echoes the request's ``after``
+    cursor: Optional[str]  # sort="oldest" only — echoes the request's ``cursor``
+    has_more: bool  # sort="oldest" only — False ONLY when the candidates ran out
+    next_cursor: Optional[str]  # sort="oldest" only (preferred) — None = walk complete
+    next_after: Optional[str]  # sort="oldest" only, legacy inclusive cursor
 
 
 # ── /rhc/equities ──
@@ -538,22 +596,52 @@ class EquitiesResponse(TypedDict, total=False):
 
 
 class TokenDeployer(TypedDict, total=False):
+    """Returned whenever the token row names its creator. Reputation fields are
+    None while ``history_status`` is "pending" (not in the reputation view yet)
+    or "unavailable" (that lookup failed)."""
+
+    identity_status: str  # "known"
+    history_status: str  # "computed" | "pending" | "unavailable"
     address: str
-    tier: str
-    tokens_deployed: int
+    tier: Optional[str]
+    tokens_deployed: Optional[int]
     graduation_rate: Optional[float]
     runner_rate: Optional[float]
-    runners: int
+    runners: Optional[int]
     best_peak_mc_usd: Optional[float]
-    launchpads: List[str]
+    launchpads: Optional[List[str]]
+
+
+class TokenKolParticipant(TypedDict, total=False):
+    kol_id: str
+    name: Optional[str]
+    twitter_url: Optional[str]
+    buys: int
+    sells: int
+    last_trade_at: Optional[str]
+
+
+class TokenKolActivityWindow(TypedDict, total=False):
+    kind: str  # "all_time" | "latest_trades"
+    first_trade_at: Optional[str]
+    last_trade_at: Optional[str]
 
 
 class TokenKolActivity(TypedDict, total=False):
-    distinct_kols: int
+    distinct_kols: int  # distinct stable KOL ids, not display names
     names: List[str]
     buys: int
     sells: int
     net_eth: float
+    distinct_wallets: int
+    buy_eth: float
+    sell_eth: float
+    participants: List[TokenKolParticipant]  # up to 20, most recent first
+    identity: str  # "kol_wallet_id"
+    window: TokenKolActivityWindow
+    basis: str  # "all_trades" (complete aggregate) or "latest_N_trades" (fallback sample)
+    complete: bool
+    sample_size: int  # fallback sample only
 
 
 class TokenDetail(TypedDict, total=False):
@@ -567,17 +655,24 @@ class TokenDetail(TypedDict, total=False):
     graduated_pool: Optional[str]
     graduated_at: Optional[str]
     deployer_address: Optional[str]
+    deployer_identity_status: str  # "known" | "unresolved" | "unavailable"
     first_seen_at: Optional[str]
     token_age_minutes: Optional[int]
     price_usd: Optional[float]
     price_native: Optional[float]
+    price_observed_at: Optional[str]  # last trade that set the price — the age anchor
+    price_age_seconds: Optional[int]
+    price_is_stale: bool  # True when price_age_seconds > 900
+    price_updated_at: Optional[str]  # row write time — NOT a price-age anchor
     market_cap_usd: Optional[float]
     fdv_usd: Optional[float]
     peak_mc_usd: Optional[float]
     peak_mc_at: Optional[str]
     drawdown_from_peak_pct: Optional[int]
-    total_supply_raw: Optional[str]
+    total_supply_raw: Optional[str]  # raw uint256 as a decimal string
     liquidity_usd: Optional[float]
+    liquidity_basis: str  # "v4_virtual_ceiling" | "measured"
+    liquidity_note: str
     primary_dex: Optional[str]
     primary_pool: Optional[str]
     last_trade_time: Optional[str]
@@ -585,6 +680,7 @@ class TokenDetail(TypedDict, total=False):
     deployer_other_tokens: List[str]
     kol_activity: TokenKolActivity
     pools: List[dict]
+    degraded_fields: List[str]  # blocks whose lookup failed — unknown, not empty
 
 
 # ── /rhc/tokens/{address}/candles ──
@@ -612,12 +708,22 @@ class Candle(TypedDict, total=False):
     pool_address: Optional[str]
 
 
-class CandlesResponse(TypedDict, total=False):
-    chain: str
-    token_address: str
-    timeframe: str
-    candles: List[Candle]
-    count: int
+# Functional form: ``from`` is a Python keyword, so it cannot be a class-syntax key.
+CandlesResponse = TypedDict(
+    "CandlesResponse",
+    {
+        "chain": str,
+        "token_address": str,
+        "timeframe": str,
+        "from": Optional[str],  # window actually served; None when the token has no candles
+        "to": Optional[str],
+        "candles": List[Candle],
+        "count": int,
+        "truncated": bool,  # True when the page budget ran out before limit/from was reached
+        "covered_from": Optional[str],  # oldest instant actually searched
+    },
+    total=False,
+)
 
 
 # ── /rhc/tokens/{address}/kol-consensus ──
@@ -661,6 +767,8 @@ class BuyerQualityBreakdown(TypedDict, total=False):
     recycled_early_buyer_count: int
     avg_historical_win_rate: Optional[float]
     bot_dominated: bool
+    wallets_with_history: int  # buyers with ≥3 tokens of history
+    qualified_win_rate_wallets: int  # buyers whose win rate fed the score
 
 
 class BuyerQuality(TypedDict, total=False):
@@ -674,6 +782,7 @@ class BuyerQualityResponse(TypedDict, total=False):
     chain: str
     token_address: str
     current_mc_usd: Optional[float]
+    cohort_selection: str  # "distinct_first_buy" | "legacy_row_window"
     quality: BuyerQuality
     coverage: dict
     note: str
@@ -746,6 +855,58 @@ Entered / exited holders per window, read from the ``Transfer``-log fold
 object is ``None`` only if the growth read failed; a single window is ``None``
 when the chain had no ingested trades in it. Access as ``growth["24h"]``.
 """
+
+
+# ── /rhc/tokens/{address}/early-buyers ──
+
+
+class EarlyBuyer(TypedDict, total=False):
+    """One ranked early buyer on ``GET /rhc/tokens/{address}/early-buyers``.
+
+    ``realized_eth`` is ``sold_eth - bought_eth`` and is a PROFIT only when
+    ``position == "closed"``; an open position shows a negative figure because
+    the buyer has spent and not sold. ``balance`` is a raw uint256 STRING.
+    """
+
+    rank: int  # 1 = first buyer observed
+    wallet: str
+    first_buy_at: Optional[str]
+    first_buy_block: Optional[int]
+    still_holding: Optional[bool]  # None when no holding data exists for this wallet
+    balance: Optional[str]
+    position: str  # "closed" | "open" | "unknown"
+    bought_eth: Optional[float]
+    sold_eth: Optional[float]
+    realized_eth: Optional[float]
+    trades: Optional[int]
+    avg_entry_mc_usd: Optional[float]
+
+
+class EarlyBuyersSummary(TypedDict, total=False):
+    ranked: int
+    with_holding_data: int
+    still_holding: int
+    exited: int
+    closed_positions: int
+    realized_eth_closed_only: Optional[float]
+
+
+class EarlyBuyersResponse(TypedDict, total=False):
+    """``GET /rhc/tokens/{address}/early-buyers`` (PRO+).
+
+    An empty ``early_buyers`` list comes with a ``note``: the token is not yet
+    ranked (the ranking is recomputed daily), never "it had no early buyers".
+    ``still_holding`` is exact only when ``holdings_verified`` is true.
+    """
+
+    chain: str  # "robinhood"
+    token_address: str
+    early_buyers: List[EarlyBuyer]
+    count: int
+    computed_at: Optional[str]
+    holdings_verified: Optional[bool]
+    summary: Optional[EarlyBuyersSummary]
+    note: str
 
 
 # ── /rhc/deployer-hunter/leaderboard ──
@@ -965,6 +1126,8 @@ class DeployerAlert(TypedDict, total=False):
     mc_at_alert: Optional[float]
     current_mc_usd: Optional[float]
     liquidity_usd: Optional[float]
+    liquidity_basis: str  # "v4_virtual_ceiling" | "measured"
+    risk: Optional[RhcTokenRiskSummary]  # None = not assessed (NOT safe)
     priority: str  # "high" | "medium"
     is_active: bool
     created_at: str
@@ -977,8 +1140,12 @@ class DeployerAlertsResponse(TypedDict, total=False):
     limit: int
     offset: int
     tradability_filter: str
+    liquidity_note: str
     next_event_at: Optional[str]
     next_before: Optional[str]
+    next_cursor: Optional[str]  # pass as ``cursor``; None = end of feed
+    has_more: bool
+    scan: ScanMeta
     data_age_seconds: Optional[int]
 
 
@@ -1034,6 +1201,9 @@ class RecentBondsResponse(TypedDict, total=False):
     tokens: List[RecentBondToken]
     limit: int
     next_peak_mc_at: Optional[str]
+    next_cursor: Optional[str]  # pass as ``cursor``; None = end of feed
+    has_more: bool
+    scan: ScanMeta
 
 
 # ── POST /rhc/token/batch ──
@@ -1042,6 +1212,10 @@ class RecentBondsResponse(TypedDict, total=False):
 class TokenBatchEntry(TypedDict, total=False):
     address: str
     found: bool
+    # "ok" | "no_price_yet" | "mc_unavailable" | "not_seen_yet" (found=False):
+    # why a price field is null.
+    status: str
+    hint: str  # found=False only
     symbol: Optional[str]
     name: Optional[str]
     decimals: Optional[int]
@@ -1114,6 +1288,7 @@ class CoordinationToken(TypedDict, total=False):
     current_mc_usd: Optional[float]
     peak_mc_usd: Optional[float]
     liquidity_usd: Optional[float]
+    liquidity_basis: str  # "v4_virtual_ceiling" | "measured"
     kols: List[CoordinationKol]
 
 
@@ -1157,6 +1332,8 @@ class FirstTouchesResponse(TypedDict, total=False):
     events: List[FirstTouchEvent]
     count: int
     next_before: Optional[str]
+    next_cursor: Optional[str]  # pass as ``cursor``; None on the legacy path / at the end
+    has_more: Optional[bool]  # exact; None when the server is on the legacy path
     data_age_seconds: Optional[int]
 
 
@@ -1176,6 +1353,12 @@ class AlphaWallet(TypedDict, total=False):
     memecoin_share: Optional[float]
     avg_trade_mc_usd: Optional[float]
     last_trade_at: Optional[str]
+    zero_cost_share: Optional[float]  # share of ETH extracted from never-bought tokens; None = never sold
+
+
+class AlphaAttribution(TypedDict, total=False):
+    attribution_complete_from: str
+    note: str
 
 
 class AlphaWalletsResponse(TypedDict, total=False):
@@ -1185,6 +1368,7 @@ class AlphaWalletsResponse(TypedDict, total=False):
     limit: int
     offset: int
     has_more: bool
+    attribution: AlphaAttribution
 
 
 # ── /rhc/copytrade/subscriptions ──
@@ -1210,6 +1394,11 @@ class CopyTradeSubscription(TypedDict, total=False):
     source_wallets_tracked: Optional[List[str]]
     source_wallets_untracked: Optional[List[str]]
     warnings: List["CopyTradeRuleWarning"]  # present only when something needs attention
+    # Added 2026-10-02 (absent on older servers): whether the rule can fire at
+    # all, separate from is_active (your switch). "eligible" | "no_tracked_sources"
+    # (kept, but can never fire) | "unknown" (tracking read failed; never
+    # assumed eligible).
+    operational_state: str
 
 
 class CopyTradeRuleWarning(TypedDict):
@@ -1465,9 +1654,9 @@ class WalletStats(TypedDict, total=False):
     realized_pnl_eth: float
     unrealized_pnl_eth: float
     total_pnl_eth: float
-    held_value_eth: float
+    held_value_eth: float  # FIFO figure, NOT an on-chain balance (see holdings)
     unique_tokens: int
-    open_positions: int
+    open_positions: int  # FIFO-open; how many are still held is in holdings
     window_days: int
     partial: bool
 
@@ -1505,6 +1694,10 @@ class WalletProfileResponse(TypedDict, total=False):
     top_tokens: List[Any]
     recent_trades: List[Any]
     derived: WalletDerived
+    # Added 2026-10-02: on-chain verification of every FIFO-open position.
+    # top_tokens[].holding_status carries the per-token status (None when the
+    # token is FIFO-closed); top_tokens[].still_holding keeps its FIFO meaning.
+    holdings: Optional["HoldingsSummary"]
     stats_unavailable: bool
     cache_hit: bool  # the wallet trio shares one snapshot cache
 
@@ -1599,12 +1792,55 @@ class WalletPnlResponse(TypedDict, total=False):
     cache_hit: bool
 
 
+class HoldingsSummary(TypedDict, total=False):
+    """Proven-holdings view (server 2026-10-02): balanceOf from our own RHC node."""
+
+    balance_source: str  # "rhc_node_multicall3"
+    checked_at: str
+    complete: bool  # False when any position is BALANCE_UNVERIFIED (no value)
+    fifo_open_positions: int
+    held: int
+    partially_reduced: int
+    transferred_or_disposed: int
+    external_inflow: int
+    unverified: int
+    verified_value_eth: float  # proven balances x price; unverified/unpriced add 0
+    unpriced_held: int
+    cost_basis_held_eth: float
+    unrealized_known_eth: float  # known-cost, still-held portion only
+    cost_basis_not_held_eth: float  # FIFO lots no longer held; outcome unknown
+
+
+class VerifiedOpenPosition(OpenPosition, total=False):
+    """A /positions row: the FIFO position plus its on-chain check (2026-10-02).
+
+    holding_status: "HELD" (within 0.5 % of FIFO) | "PARTIALLY_REDUCED" |
+    "TRANSFERRED_OR_DISPOSED" (balance 0) | "EXTERNAL_INFLOW" (balance > FIFO;
+    the excess has no cost basis) | "BALANCE_UNVERIFIED" (read failed: no value,
+    never assumed held).
+    """
+
+    fifo_unmatched_amount: Optional[float]  # same as token_amount
+    current_onchain_balance: Optional[float]  # None = not proven
+    holding_status: str
+    # "rpc_unavailable" | "call_failed" | "decimals_failed" | "over_cap" |
+    # "decimals_mismatch" | "decimals_unknown"
+    holding_unverified_reason: Optional[str]
+    held_known_amount: Optional[float]
+    external_inflow_amount: Optional[float]
+    current_holding_value_eth: Optional[float]
+    cost_basis_held_eth: Optional[float]
+    unrealized_known_eth: Optional[float]
+    cost_basis_not_held_eth: Optional[float]
+
+
 class WalletPositionsSummary(TypedDict, total=False):
-    open_positions: int
+    open_positions: int  # FIFO-open; see holdings for what is still held
     total_cost_basis_eth: float
-    total_current_value_eth: float
+    total_current_value_eth: float  # FIFO figure; proven value = holdings.verified_value_eth
     total_unrealized_eth: float
     unpriced_positions: int  # excluded from the value/unrealized totals
+    holdings: HoldingsSummary  # added 2026-10-02; absent on older servers
 
 
 class WalletPositionsResponse(TypedDict, total=False):
@@ -1612,7 +1848,7 @@ class WalletPositionsResponse(TypedDict, total=False):
     address: str
     window_days: int
     summary: WalletPositionsSummary
-    positions: List[OpenPosition]
+    positions: List[VerifiedOpenPosition]
     notes: Any
 
 
@@ -1727,14 +1963,43 @@ class RhcLockNextUnlock(TypedDict, total=False):
     amount_usd: Optional[float]
 
 
+class RhcLockProvider(TypedDict, total=False):
+    """Who runs the lock contract (2026-10-02). Identity is decided by the
+    locker CONTRACT ADDRESS, never by the family (an ABI shape forks copy).
+    ``verified`` = a known provider deployment (HoodLock vault + vesting,
+    Sablier Lockup v4, Titan Locker V2.1); ``compatible`` = the events match a
+    known provider's ABI (``compatible_with``) but the operator is NOT
+    identified, so ``id`` / ``website_url`` / ``lock_url`` are None;
+    ``unverified`` = unknown. ``lock_url`` only where the per-lock page format
+    is proven (HoodLock vault) — never guessed."""
+
+    id: Optional[str]
+    name: Optional[str]
+    identity: str  # verified | compatible | unverified
+    compatible_with: Optional[str]
+    website_url: Optional[str]
+    lock_url: Optional[str]
+
+
+class RhcLockExplorer(TypedDict, total=False):
+    """Blockscout links (independent evidence, 2026-10-02)."""
+
+    locker_url: Optional[str]
+    creation_tx_url: Optional[str]
+
+
 class RhcTokenLock(TypedDict, total=False):
     """One lock / vesting contract. Raw amounts are decimal strings; ui / usd /
     pct are None when decimals or price are unknown. ``withdrawn_*`` is always
-    None — withdrawals are not tracked on RHC (create-only tape)."""
+    None — withdrawals are not tracked on RHC (create-only tape). LP rows
+    (``subject == "lp"``) carry LP-token / liquidity units (``amount_unit``)
+    and never get usd, ``price_usd`` or % of supply."""
 
     lock_id: str
     locker: str
     locker_name: Optional[str]
+    provider: RhcLockProvider
+    explorer: RhcLockExplorer
     family: str
     family_name: str
     locker_lock_id: Optional[str]
@@ -1750,8 +2015,9 @@ class RhcTokenLock(TypedDict, total=False):
     amount_raw: Optional[str]
     amount: Optional[float]
     amount_usd: Optional[float]
+    price_usd: Optional[float]
     amount_pct_of_supply: Optional[float]
-    amount_unit: Optional[str]
+    amount_unit: Optional[str]  # token | lp_token | liquidity | None (NFT position)
     locked_raw: Optional[str]
     locked: Optional[float]
     locked_usd: Optional[float]
@@ -1763,6 +2029,8 @@ class RhcTokenLock(TypedDict, total=False):
     start_at: Optional[str]
     cliff_at: Optional[str]
     end_at: Optional[str]
+    seconds_until_end: Optional[int]  # 0 once completed; None without an end date
+    seconds_until_next_unlock: Optional[int]
     cliff_amount_raw: Optional[str]
     cliff_amount: Optional[float]
     continuous: bool

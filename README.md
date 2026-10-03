@@ -13,6 +13,10 @@ Live KOL trades and consensus clustering, token discovery, launch-bundle detecti
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card (live feeds 5-min delayed; paid tiers are real-time). Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
+> **New in 0.17.0: token lock provenance.** `RhcTokenLock` TypedDict + docstring: Token lock rows carry `provider` (identity decided by the locker contract address: `verified` only for known provider deployments; `compatible` = ABI match, operator not identified, no id / website / `lock_url`), `explorer` (Blockscout links), `price_usd`, `seconds_until_end`, `seconds_until_next_unlock` (server 2026-10-02). RHC withdrawals stay untracked (`withdrawn` null); LP rows never get usd / price / %. `token_locks()` also takes `cursor` (`pagination["next_cursor"]`, strict keyset paging). Additive only.
+
+> **New in 0.18.0: Robinhood Chain holdings verified on-chain.** `wallet_positions()` rows are typed `VerifiedOpenPosition` (`current_onchain_balance`, `holding_status`) with `summary.holdings` (`HoldingsSummary`); `wallet()` gains `holdings`; copy-trade rules gain `operational_state`. Types and docs only.
+
 > **New in 0.16.0: a keyless paid call whose answer is lost is recovered, never paid twice (PAY-05).** Sync and async: when the answer to a paid GET is lost or still pending (timeout, connection error, gateway 502/503/504, 429, or the server's `payment_uncertain` / `paid_result_in_progress` / `paid_result_missing`), the client re-sends the SAME signed authorization with a `PAYMENT-RECOVERY` header (EIP-191 signature by the authorizer) and receives the stored answer, byte-identical. It never signs a new authorization and a recovery retry never uses `PaymentPolicy` budget. Bounds via `RecoveryOptions`; after them `X402PaymentError` carries `code`, `payment_id`, `retryable`, `new_payment_allowed` (only for a server-proven `not_paid`); `client.last_paid_result` gives the provenance (original/deferred, live/stored, times, sha256). Against a server that does not offer recovery (older, or with recovery switched off) the result is the previous behaviour: a re-presented proof ends in the 409 `replay_detected` and is surfaced, never re-paid. **API-key users: no change.**
 
 > **New in 0.13.0 — named subscriptions: several independent subscriptions per socket.** `subscribe(channels, filters, sub_id="...")`, `update_subscription(sub_id, filters)`, `unsubscribe("sub-id")`, `get_subscriptions()` / `await list_subscriptions()`. Each named subscription has its own channels and filters (the server caps the total per connection, default included: PRO 5, ULTRA 10, BUSINESS 20); frames carry `evt["sub_id"]`; an event matching several subscriptions is delivered once per subscription (dedupe per `(sub_id, id)`). Resume is per subscription with one commit for the connection. The plain `subscribe(channels, filters)` API is unchanged. See "Named subscriptions" in the stream section.
@@ -57,7 +61,7 @@ for t in feed["trades"]:
 
 ## Authentication
 
-Two modes. **Key mode** — Bearer `msk_` API key, the same key and base URL as the Solana MadeOnSol API, all 54 operations. **Keyless x402 mode** (0.7.0) — `private_key=` of an EVM wallet holding USDG on Robinhood Chain pays per call on the 10-endpoint rail documented at [madeonsol.com/robinhood/x402](https://madeonsol.com/robinhood/x402); needs `pip install "robinhood-chain[x402]"`.
+Two modes. **Key mode** — Bearer `msk_` API key, the same key and base URL as the Solana MadeOnSol API, every operation listed below. **Keyless x402 mode** (0.7.0) — `private_key=` of an EVM wallet holding USDG on Robinhood Chain pays per call on the 10-endpoint rail documented at [madeonsol.com/robinhood/x402](https://madeonsol.com/robinhood/x402); needs `pip install "robinhood-chain[x402]"`.
 
 ```python
 import os
@@ -116,7 +120,7 @@ synchronous HTTP uses per-phase timeouts capped by remaining time and checks the
 between steps. Synchronous hooks/signers cannot be forcibly interrupted. A timeout cannot
 undo a submitted proof. Existing `timeout` still bounds each HTTP phase.
 
-## Endpoints — the 54 Robinhood Chain operations
+## Endpoints — every Robinhood Chain operation
 
 Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 hex). Everything is a GET except the two batch POSTs and the four rule engines, which are full CRUD.
 
@@ -149,6 +153,7 @@ Base URL `https://madeonsol.com/api/v1`. All addresses are lowercase `0x` (40 he
 | `client.token_top_traders(address, limit=, offset=)` | `GET /api/v1/rhc/tokens/{address}/top-traders` | PRO+ |
 | `client.token_flow(address, window=)` | `GET /api/v1/rhc/tokens/{address}/flow` | PRO+ |
 | `client.token_peak_history(address, window=, curve=)` | `GET /api/v1/rhc/tokens/{address}/peak-history` | PRO+ |
+| `client.token_early_buyers(address, limit=)` — first 20 buyers ranked, with `position` / `still_holding` (`realized_eth` is a profit only when `position == "closed"`) | `GET /api/v1/rhc/tokens/{address}/early-buyers` | PRO+ |
 | `client.token_risk(address)` | `GET /api/v1/rhc/tokens/{address}/risk` | PRO+ |
 | `client.token_holders(address, limit=, offset=)` — exact holders + concentration from `Transfer` logs (check `verified`), plus `holder_growth` (`"1h"` / `"24h"` / `"7d"`: `entered`, `entered_still_holding`, `exited`, `net` ≈ Δ `holder_count`; pools/burns excluded, a window is `None` only when the chain had no ingested trades in it) | `GET /api/v1/rhc/tokens/{address}/holders` | PRO+ |
 
