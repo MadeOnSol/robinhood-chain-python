@@ -777,21 +777,60 @@ class RobinhoodClient:
         )
 
     def kol_leaderboard(
-        self, *, period: str = "24h", limit: int = 50
+        self,
+        *,
+        period: str = "24h",
+        limit: int = 50,
+        sort: str | None = None,
+        min_closed: int | None = None,
     ) -> t.KolLeaderboardResponse:
-        """KOL activity leaderboard on Robinhood Chain (BASIC+).
+        """KOL leaderboard on Robinhood Chain (BASIC+; win-rate sorts PRO+).
 
-        KOLs ranked by trade count then net ETH flow over the window.
+        Default: KOLs ranked by trade count then net ETH flow over the window.
         ``net_eth`` is buy−sell flow, not realized PnL.
 
         Args:
-            period: Rolling window — ``'24h'`` | ``'7d'`` | ``'30d'``.
+            period: Rolling window — ``'24h'`` | ``'7d'`` | ``'30d'`` (activity ranking only).
             limit: Max KOLs (1–100, default 50).
+            sort: ``'trades'`` (default) or ``'winrate_7d'`` | ``'winrate_30d'``
+                (PRO+): FIFO win rate over fully closed positions, the same
+                numbers as ``kol_wallet(include_performance=True)``.
+            min_closed: Win-rate sorts only: minimum closed positions (1–100, default 3).
 
-        Route: ``GET /api/v1/rhc/kol/leaderboard``. Tier: BASIC.
+        Route: ``GET /api/v1/rhc/kol/leaderboard``. Tier: BASIC (PRO+ for win-rate sorts).
         """
         return self._get(
-            "/rhc/kol/leaderboard", {"period": period, "limit": limit}
+            "/rhc/kol/leaderboard",
+            {"period": period, "limit": limit, "sort": sort, "min_closed": min_closed},
+        )
+
+    def kol_scout_leaderboard(
+        self,
+        *,
+        limit: int = 50,
+        scout_tier: str | None = None,
+        sort: str | None = None,
+        min_first_touches: int | None = None,
+    ) -> dict:
+        """Scout KOL leaderboard on Robinhood Chain (PRO+).
+
+        A first touch is a KOL buy of a token no KOL bought before. Per KOL:
+        first touches in the last 30 days (at least 4 h old), followers within
+        4 h, and the share that drew 3+ / 5+ other KOLs. Identity is the KOL,
+        not the address. ``scout_tier`` is None below 30 first touches.
+
+        Args:
+            limit: 1–100, default 50.
+            scout_tier: ``'S'`` | ``'A'`` | ``'B'`` | ``'C'``.
+            sort: ``'scout_score'`` | ``'n_first_touches_30d'`` | ``'swarm_3plus_pct'``
+                (default) | ``'swarm_5plus_pct'`` | ``'avg_followers_4h'``.
+            min_first_touches: Leave out KOLs with fewer first touches (default 30).
+
+        Route: ``GET /api/v1/rhc/kol/scouts/leaderboard``. Tier: PRO+.
+        """
+        return self._get(
+            "/rhc/kol/scouts/leaderboard",
+            {"limit": limit, "scout_tier": scout_tier, "sort": sort, "min_first_touches": min_first_touches},
         )
 
     def kol_hot_tokens(self, *, window: str = "1h") -> t.HotTokensResponse:
@@ -910,7 +949,7 @@ class RobinhoodClient:
             },
         )
 
-    def kol_wallet(self, wallet: str) -> t.KolProfileResponse:
+    def kol_wallet(self, wallet: str, include_performance: bool | None = None) -> t.KolProfileResponse:
         """Single KOL profile on Robinhood Chain (BASIC+).
 
         Aggregate stats over one KOL's last 200 RHC trades plus their 50 most
@@ -918,11 +957,14 @@ class RobinhoodClient:
 
         Args:
             wallet: KOL EVM wallet address (``0x`` + 40 hex).
+            include_performance: PRO+. Adds ``performance``: 7d/30d win rate,
+                realized PnL and strategy classification from the FIFO wallet
+                snapshot.
 
-        Route: ``GET /api/v1/rhc/kol/{wallet}``. Tier: BASIC. 404 if the wallet
-        has no RHC activity.
+        Route: ``GET /api/v1/rhc/kol/{wallet}``. Tier: BASIC (PRO+ with
+        ``include_performance``). 404 if the wallet has no RHC activity.
         """
-        return self._get(f"/rhc/kol/{wallet}")
+        return self._get(f"/rhc/kol/{wallet}", params={"include_performance": include_performance})
 
     # ── DEX trade tape ─────────────────────────────────────────────────────
 
@@ -1347,7 +1389,7 @@ class RobinhoodClient:
         """
         return self._get(f"/rhc/tokens/{address}/kol-consensus")
 
-    def token_buyer_quality(self, address: str) -> t.BuyerQualityResponse:
+    def token_buyer_quality(self, address: str, *, include_balances: bool | None = None) -> t.BuyerQualityResponse:
         """Early-buyer quality on a Robinhood Chain token (BASIC+).
 
         A 0–100 quality read on a token's earliest distinct buyer cohort (first
@@ -1360,9 +1402,32 @@ class RobinhoodClient:
 
         Route: ``GET /api/v1/rhc/tokens/{address}/buyer-quality``. Tier: BASIC.
         """
-        return self._get(f"/rhc/tokens/{address}/buyer-quality")
+        # include_balances=True (PRO+): dump_cluster_held_now = the dump-cluster
+        # early buyers' current balanceOf from our node.
+        return self._get(f"/rhc/tokens/{address}/buyer-quality", params={"include_balances": include_balances})
 
-    def token_bundle(self, address: str) -> t.BundleResponse:
+    def token_bundle_share(self, address: str, *, window: str = "24h", min_wallets: int | None = None) -> dict:
+        """ONE figure: share of supply held now by all bundle wallets (launch
+        bundle ∪ every cluster in the window, each wallet once, balanceOf from
+        our node). Cached 30 s per token (PRO+).
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/bundle-share``.
+        """
+        return self._get(f"/rhc/tokens/{address}/bundle-share", params={"window": window, "min_wallets": min_wallets})
+
+    def token_bundle_clusters(
+        self, address: str, *, window: str = "24h", min_wallets: int | None = None,
+        limit: int | None = None, include_balances: bool | None = None,
+    ) -> dict:
+        """Every coordinated buy cluster on a Robinhood Chain token in a window,
+        the launch bundle AND clusters that enter later (PRO+).
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/bundles``.
+        """
+        return self._get(f"/rhc/tokens/{address}/bundles",
+                         params={"window": window, "min_wallets": min_wallets, "limit": limit, "include_balances": include_balances})
+
+    def token_bundle(self, address: str, *, include_balances: bool | None = None) -> t.BundleResponse:
         """Launch-bundle detection on a Robinhood Chain token (BASIC+).
 
         Ranks the first 20 distinct buyers by on-chain order and flags a bundle
@@ -1378,7 +1443,9 @@ class RobinhoodClient:
 
         Route: ``GET /api/v1/rhc/tokens/{address}/bundle``. Tier: BASIC.
         """
-        return self._get(f"/rhc/tokens/{address}/bundle")
+        # include_balances=True (PRO+): held_now = the cohort's current balanceOf
+        # from our node; totals only when every wallet was read.
+        return self._get(f"/rhc/tokens/{address}/bundle", params={"include_balances": include_balances})
 
     def token_top_traders(
         self, address: str, *, limit: int | None = None, offset: int | None = None
@@ -1391,7 +1458,9 @@ class RobinhoodClient:
 
         ``net_eth`` is REALIZED flow (``sell − buy``) and is **not PnL**: it does
         not value a trader's remaining bag, so a wallet that bought and still
-        holds ranks last. Use :meth:`wallet_pnl` for FIFO cost-basis PnL.
+        holds ranks last. Each trader also carries ``fifo``: FIFO realized PnL
+        on this token, the :meth:`wallet_pnl` method (null unless
+        ``fifo_status`` is ``"ok"``; open lots are not valued).
 
         Args:
             address: Token address (``0x`` + 40 hex).
@@ -1456,8 +1525,60 @@ class RobinhoodClient:
             params={"window": window, "curve": curve},
         )
 
+    def token_kol_trades(
+        self,
+        address: str,
+        *,
+        limit: int | None = None,
+        action: str | None = None,
+        kol: str | None = None,
+        since: str | None = None,
+        cursor: str | None = None,
+        include_balances: bool | None = None,
+    ) -> dict:
+        """Every stored KOL trade on one Robinhood Chain token, newest first.
+
+        Keyset paged: pass ``next_cursor`` as ``cursor``. BASIC gets the
+        5-minute delayed tape and at most 20 rows. ``include_balances=True``
+        (PRO+) adds the current ``balanceOf(token)`` of every KOL address on the
+        page, read from our node; a failed read is ``unverified`` with a reason,
+        never a zero and never reconstructed from trades.
+
+        Route: ``GET /api/v1/rhc/tokens/{address}/kol-trades``.
+        """
+        return self._get(
+            f"/rhc/tokens/{address}/kol-trades",
+            params={"limit": limit, "action": action, "kol": kol, "since": since,
+                    "cursor": cursor, "include_balances": include_balances},
+        )
+
+    def deployer_activity(
+        self,
+        address: str,
+        *,
+        limit: int | None = None,
+        since: str | None = None,
+        types: str | None = None,
+        cursor: str | None = None,
+    ) -> dict:
+        """A developer's launches and own-token buys/sells as one timeline (PRO+).
+
+        ``event_id`` on dev trades equals the ``rhc:dev_activity`` WS id.
+        ``types`` is a comma list of ``launch``, ``dev_buy``, ``dev_sell``.
+        Developer transfers and other wallets of the same person are not
+        included; read ``coverage`` for the window and scan bounds.
+
+        Route: ``GET /api/v1/rhc/deployer-hunter/{address}/activity``.
+        """
+        return self._get(
+            f"/rhc/deployer-hunter/{address}/activity",
+            params={"limit": limit, "since": since, "types": types, "cursor": cursor},
+        )
+
     def token_early_buyers(
-        self, address: str, *, limit: int | None = None
+        self, address: str, *, limit: int | None = None,
+        verify_current_balances: bool | None = None,
+        include_scout_scores: bool | None = None,
     ) -> t.EarlyBuyersResponse:
         """The first buyers of a Robinhood Chain token, ranked, joined to the outcome (PRO+).
 
@@ -1465,23 +1586,30 @@ class RobinhoodClient:
         ``position`` (``closed`` / ``open`` / ``unknown``), ``bought_eth``,
         ``sold_eth``, ``realized_eth``, ``trades`` and ``avg_entry_mc_usd``.
 
-        ``realized_eth`` is ``sold - bought`` and is a **profit only when
-        ``position`` is ``closed``** — an open position shows a negative figure
-        because the buyer has spent and not sold. ``still_holding`` comes from
-        the same ``Transfer``-log fold as :meth:`token_holders` and is exact only
-        when ``holdings_verified`` is true. Ranks are as of ``computed_at`` (a
-        daily sweep); a token that began trading since the last run returns an
-        empty list with a ``note``, never as "no early buyers".
+        ``realized_eth`` is observed ETH cashflow (``sold - bought``), not
+        verified FIFO PnL even when the position is closed. By default,
+        ``still_holding`` comes from the reconciled ``Transfer``-log fold,
+        and becomes None rather than a false exit when that source is unverified.
+        ``verify_current_balances=True`` requires ULTRA+ and performs one
+        bounded, pinned-block onchain ``balanceOf`` batch for all ranked buyers.
+        An unavailable buyer ranking, market stats, block or balance fails the
+        WHOLE strict request with HTTP 503, not partial success.
+        Ranks are still first observed buys from our daily indexed cohort.
 
         Args:
             address: Token address (``0x`` + 40 hex).
             limit: 1–20 (the ranking depth is 20 by construction). Default 20.
+            verify_current_balances: ULTRA+ strictly verify all ≤20 ranked
+                buyers against the same pinned Hood-node block; default False.
+            include_scout_scores: Add ``is_kol`` and ``scout_score`` per buyer,
+                each KOL's score as of its own first buy (no hindsight).
 
         Route: ``GET /api/v1/rhc/tokens/{address}/early-buyers``. Tier: PRO+.
         """
         return self._get(
             f"/rhc/tokens/{address}/early-buyers",
-            params={"limit": limit},
+            params={"limit": limit, "verify_current_balances": verify_current_balances,
+                    "include_scout_scores": include_scout_scores},
         )
 
     def token_risk(self, address: str) -> dict:
@@ -1516,8 +1644,15 @@ class RobinhoodClient:
         limit: int | None = None,
         offset: int | None = None,
         after: str | None = None,
+        include_wallet_flags: bool | None = None,
     ) -> dict:
         """Exact holder set and concentration for a Robinhood Chain token (PRO+).
+
+        ``include_wallet_flags=True`` opts in to per-holder ``wallet_flags`` and a
+        top-level ``wallet_flags_meta`` (current page only). ``False``/``None`` with
+        ``label_coverage[label].evaluated == False`` means insufficient evidence,
+        not a verified negative; RHC has no sniper or wallet-level bundler
+        classifier, so those flags are always ``None``.
 
         Balances are folded from ERC-20 ``Transfer`` logs — **not** derived from
         trades — and reconciled against on-chain ``totalSupply()`` at a pinned
@@ -1557,7 +1692,7 @@ class RobinhoodClient:
         """
         return self._get(
             f"/rhc/tokens/{address}/holders",
-            params={"limit": limit, "offset": offset, "after": after},
+            params={"limit": limit, "offset": offset, "after": after, "include_wallet_flags": include_wallet_flags},
         )
 
     def token_batch(self, addresses: Sequence[str]) -> t.TokenBatchResponse:
@@ -1871,6 +2006,7 @@ class RobinhoodClient:
         limit: int = 50,
         offset: int = 0,
         sort: str = "first_seen_at",
+        include_launches_24h: bool | None = None,
     ) -> t.DeployerTokensResponse:
         """One deployer's full paginated launch history (BASIC+).
 
@@ -1891,12 +2027,17 @@ class RobinhoodClient:
                 ``sort_scope: 'page'`` when it is in effect; use
                 :meth:`deployer_hunter_best_tokens` for a real ranking.
 
+            include_launches_24h: opt in to ``launches_24h`` (distinct launches
+                observed in our index over a rolling UTC 24 h window; indexed
+                observations only, ``count`` is ``None`` unless ``status`` is
+                ``'observed'``).
+
         Route: ``GET /api/v1/rhc/deployer-hunter/{address}/tokens``. Tier: BASIC.
         Unknown wallets return 200 with ``is_deployer: False``.
         """
         return self._get(
             f"/rhc/deployer-hunter/{address}/tokens",
-            {"limit": limit, "offset": offset, "sort": sort},
+            {"limit": limit, "offset": offset, "sort": sort, "include_launches_24h": include_launches_24h},
         )
 
     def deployer_hunter_history(

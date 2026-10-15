@@ -115,6 +115,20 @@ class KolLeaderboardRow(TypedDict, total=False):
     net_eth: float
     tokens_traded: int
     last_trade_at: str
+    # Win-rate sorts only (sort="winrate_7d" | "winrate_30d", PRO+); the activity
+    # fields above are then absent. Same numbers as kol_wallet(include_performance=True).
+    evm_address: str
+    status: str
+    winrate_7d: Optional[float]
+    winrate_30d: Optional[float]
+    closed_positions_7d: int
+    closed_positions_30d: int
+    pnl_7d_eth: Optional[float]
+    pnl_30d_eth: Optional[float]
+    median_hold_minutes_30d: Optional[float]
+    auto_strategy_tag: Optional[str]
+    data_fingerprint: Optional[str]
+    computed_at: str
 
 
 class KolLeaderboardResponse(TypedDict, total=False):
@@ -122,6 +136,9 @@ class KolLeaderboardResponse(TypedDict, total=False):
     period: str
     leaderboard: List[KolLeaderboardRow]
     count: int
+    sort: str
+    min_closed: int
+    scores_meta: dict
 
 
 # ── /rhc/kol/hot-tokens ──
@@ -164,6 +181,27 @@ class KolProfileStats(TypedDict, total=False):
     window: str
 
 
+class KolPerformance(TypedDict, total=False):
+    """``include_performance=True`` (PRO+): 7d/30d win rate (percent of fully closed
+    positions), realized PnL and strategy from the FIFO wallet snapshot. Empty
+    windows are ``None``, never 0."""
+    status: str  # available | partial | unavailable
+    reason: Optional[str]
+    winrate_7d: Optional[float]
+    winrate_30d: Optional[float]
+    closed_positions_7d: int
+    closed_positions_30d: int
+    pnl_7d_eth: Optional[float]
+    pnl_30d_eth: Optional[float]
+    windows: dict
+    median_hold_minutes_30d: Optional[float]
+    auto_strategy_tag: Optional[str]  # scalper | day_trader | swing_trader | hodler
+    strategy_reason: Optional[str]
+    window_days: int
+    definition: str
+    notes: dict
+
+
 class KolProfileResponse(TypedDict, total=False):
     chain: str
     evm_address: str
@@ -171,6 +209,7 @@ class KolProfileResponse(TypedDict, total=False):
     kol_twitter: Optional[str]
     stats: KolProfileStats
     trades: List[dict]
+    performance: KolPerformance
 
 
 # ── /rhc/trades ──
@@ -187,6 +226,7 @@ class DexTrade(TypedDict, total=False):
     trader_eoa: Optional[str]  # effective trading account: tx.from, or the ERC-4337 userOp sender when bundled
     router: Optional[str]
     token_address: Optional[str]
+    pair_status: str  # 2026-10: attributed | quote_quote | equity_equity | unsupported_pair; present only when recorded
     action: Optional[str]
     eth_amount: Optional[float]
     price_native: Optional[float]
@@ -474,6 +514,54 @@ class RhcRiskVerdictSnapshot(TypedDict, total=False):
     source: str  # "rhc_token_risk"
 
 
+class RhcDevActivityProvenance(TypedDict, total=False):
+    source: str  # "rhc_dex_stream"
+    decoder: str  # "rhc-swap"
+    map_source: str  # "launchpad" | "pool_creator"
+    attribution: str  # "creator" | "pool_creator" (weaker: only the first pool's creator is known)
+    map_age_ms: Optional[int]
+    mode: str  # "on"
+    late_classified: bool
+
+
+class RhcDevActivityEvent(TypedDict, total=False):
+    """``rhc:dev_activity`` (WS ULTRA+, webhook PRO+) — the token's RECORDED
+    developer buying or selling its own token. Same contract as Solana
+    ``dev:activity`` with chain "robinhood": signature = tx hash, slot = block
+    number, block_time = chain time, quote_amount = the ETH value of the leg.
+
+    NO-TRANSFER BOUNDARY (v1): only ``dev_buy`` / ``dev_sell`` are delivered.
+    A developer token transfer is never on this channel and a missing event is
+    not evidence that no transfer happened. Dedupe on ``id``."""
+
+    id: str
+    v: int
+    type: str  # "dev_buy" | "dev_sell"
+    chain: str  # "robinhood"
+    mint: str
+    deployer_wallet: str
+    actor_wallet: str
+    actor_role: str  # "deployer"
+    action: str  # "buy" | "sell"
+    signature: str
+    slot: Optional[int]
+    block_time: Optional[str]
+    observed_at: Optional[str]
+    region: None
+    token_amount_raw: Optional[str]
+    token_decimals: Optional[int]
+    token_amount: Optional[float]
+    quote_amount: Optional[float]
+    quote_mint: Optional[str]
+    venue: Optional[str]
+    counterparty_wallet: None
+    counterparty_class: None
+    supply_pct: Optional[float]
+    identity_evidence: bool
+    catchup_replay: bool
+    provenance: RhcDevActivityProvenance
+
+
 class RhcDeployerTierChangedEvent(TypedDict, total=False):
     """``rhc:deployer_tier_changed`` on ``rhc:wallet_scores`` — the 5-min
     mv_rhc_deployers refresh found a different tier ("recomputed at T").
@@ -673,6 +761,8 @@ class TokenDetail(TypedDict, total=False):
     liquidity_usd: Optional[float]
     liquidity_basis: str  # "v4_virtual_ceiling" | "measured"
     liquidity_note: str
+    liquidity_source: str  # "pool_balances" | "v4_virtual_ceiling" | "bonding_curve_reserve" | "unknown_venue"
+    liquidity_status: str  # "available" | "verified_zero" | "unavailable" (None liquidity never means zero)
     primary_dex: Optional[str]
     primary_pool: Optional[str]
     last_trade_time: Optional[str]
@@ -785,6 +875,7 @@ class BuyerQualityResponse(TypedDict, total=False):
     cohort_selection: str  # "distinct_first_buy" | "legacy_row_window"
     quality: BuyerQuality
     coverage: dict
+    dump_cluster_held_now: dict  # include_balances only (PRO+): dump-cluster members' current balanceOf
     note: str
 
 
@@ -799,6 +890,9 @@ class BundleSummary(TypedDict, total=False):
     fully_exited: bool
     buy_volume: float
     tokens_held: float
+    # 2026-10 (COV-23): "swap_only" | "swap_and_transfers"; swap_only = token
+    # transfers are not applied (a member that transferred out still reads as holding).
+    holdings_basis: str
 
 
 class BundleWallet(TypedDict, total=False):
@@ -810,12 +904,14 @@ class BundleWallet(TypedDict, total=False):
     win_rate: Optional[float]
     likely_bot: bool
     tokens_held: float
+    balance_now: Optional[dict]  # include_balances only: current balanceOf from our node; unverified != zero
 
 
 class BundleResponse(TypedDict, total=False):
     chain: str
     token_address: str
     bundle: BundleSummary
+    held_now: dict  # include_balances only (PRO+): totals only when every cohort wallet was read
     wallets: List[BundleWallet]
 
 
@@ -860,6 +956,17 @@ when the chain had no ingested trades in it. Access as ``growth["24h"]``.
 # ── /rhc/tokens/{address}/early-buyers ──
 
 
+class ScoutScore(TypedDict, total=False):
+    """RHC KOL scout score as of ``as_of`` (no input after it). ``scout_tier`` None below 30 first touches."""
+
+    as_of: str
+    first_touches_30d: int
+    avg_followers_4h: Optional[float]
+    swarm_3plus_pct: Optional[float]
+    swarm_5plus_pct: Optional[float]
+    scout_tier: Optional[str]  # "S" | "A" | "B" | "C"
+
+
 class EarlyBuyer(TypedDict, total=False):
     """One ranked early buyer on ``GET /rhc/tokens/{address}/early-buyers``.
 
@@ -872,21 +979,26 @@ class EarlyBuyer(TypedDict, total=False):
     wallet: str
     first_buy_at: Optional[str]
     first_buy_block: Optional[int]
-    still_holding: Optional[bool]  # None when no holding data exists for this wallet
-    balance: Optional[str]
+    still_holding: Optional[bool]  # None when holder read/reconciliation fails (unknown, never false)
+    balance: Optional[str]  # Raw observed fold balance; not necessarily a pinned/recent chain-head proof
+    holding_status: str  # "verified_nonzero" | "verified_zero" | "unverified" (source reconciliation only)
+    holding_reason: str  # e.g. "holder_read_failed" or "supply_reconciliation_unverified"
     position: str  # "closed" | "open" | "unknown"
     bought_eth: Optional[float]
     sold_eth: Optional[float]
     realized_eth: Optional[float]
     trades: Optional[int]
     avg_entry_mc_usd: Optional[float]
+    is_kol: Optional[bool]  # include_scout_scores only; None = unknown
+    scout_score: Optional[ScoutScore]  # include_scout_scores only; as of this buyer's first_buy_at
 
 
 class EarlyBuyersSummary(TypedDict, total=False):
     ranked: int
     with_holding_data: int
     still_holding: int
-    exited: int
+    exited: int  # only source-verified zero balances
+    unknown_holding: int  # not evidenced, never classified as exited
     closed_positions: int
     realized_eth_closed_only: Optional[float]
 
@@ -905,7 +1017,12 @@ class EarlyBuyersResponse(TypedDict, total=False):
     count: int
     computed_at: Optional[str]
     holdings_verified: Optional[bool]
+    holder_recon_block: Optional[int]  # previous supply-reconciliation reference, not an atomic read
+    holder_recon_checked_at: Optional[str]
+    onchain_balance_verification: Optional[dict]  # ULTRA+ pinned Hood block, all wallets checked or 503
     summary: Optional[EarlyBuyersSummary]
+    scout_scores_status: str  # include_scout_scores only: "ok" | "unavailable" | "timeout" | "error"
+    scout_scores_note: str
     note: str
 
 
@@ -1048,6 +1165,23 @@ class DeployerTokensResponse(TypedDict, total=False):
     has_more: bool
     sort: str
     sort_scope: str  # only present when sort='peak_mc_usd' (page-scoped ordering)
+    launches_24h: "DeployerLaunches24h"  # only with include_launches_24h=True
+
+
+class DeployerLaunches24h(TypedDict, total=False):
+    """Launches observed in our index over a rolling UTC 24 h window (not chain-complete).
+
+    ``count`` is ``None`` (never 0) unless ``status`` is ``'observed'``.
+    """
+
+    window_start: str
+    window_end: str
+    count: Optional[int]
+    status: str  # observed | source_unavailable | over_budget | source_incomplete | untracked_deployer
+    completeness: str  # indexed_observations_only
+    provenance: str
+    row_cap_per_source: int
+    source_rows: Dict[str, int]
 
 
 # ── /rhc/deployer-hunter/best-tokens ──
@@ -1227,6 +1361,8 @@ class TokenBatchEntry(TypedDict, total=False):
     market_cap_usd: Optional[float]
     fdv_usd: Optional[float]
     liquidity_usd: Optional[float]
+    liquidity_source: str  # "pool_balances" | "v4_virtual_ceiling" | "bonding_curve_reserve" | "unknown_venue"
+    liquidity_status: str  # "available" | "verified_zero" | "unavailable"
     peak_mc_usd: Optional[float]
     peak_mc_at: Optional[str]
     primary_dex: Optional[str]
@@ -1387,9 +1523,11 @@ class CopyTradeSubscription(TypedDict, total=False):
     is_active: bool
     created_at: str
     updated_at: str
-    # Added 2026-09-22 (absent on older servers). Only TRACKED Robinhood Chain
-    # KOL wallets (kol_evm_wallets — the set behind /rhc/kol/wallets) can ever
-    # fire; ``source_wallets_untracked`` lists the ones that never will. Both
+    # Added 2026-09-22 (absent on older servers). Under the legacy "kol_only"
+    # engine only TRACKED Robinhood Chain KOL wallets (kol_evm_wallets, the set
+    # behind /rhc/kol/wallets) fire and ``source_wallets_untracked`` lists the
+    # ones that never will. Production runs "any_wallet" since 2026-10-04: both
+    # lists are deprecated KOL enrichment and every valid wallet fires. Both
     # are None when the server could not read the reference set (see warnings).
     source_wallets_tracked: Optional[List[str]]
     source_wallets_untracked: Optional[List[str]]
@@ -1398,7 +1536,13 @@ class CopyTradeSubscription(TypedDict, total=False):
     # all, separate from is_active (your switch). "eligible" | "no_tracked_sources"
     # (kept, but can never fire) | "unknown" (tracking read failed; never
     # assumed eligible).
+    # 2026-10-04: under source_admission "any_wallet" any valid source wallet is
+    # followed (KOL or not; source_wallets_tracked/_untracked are deprecated
+    # enrichment) and the non-eligible states are infrastructure only:
+    # "monitoring_pending" | "monitoring_unavailable" | "source_capacity_unavailable".
     operational_state: str
+    source_admission: str  # "kol_only" | "any_wallet" (2026-10-04; absent = unknown/legacy)
+    monitoring_reasons: List[str]  # present only with "monitoring_unavailable"
 
 
 class CopyTradeRuleWarning(TypedDict):

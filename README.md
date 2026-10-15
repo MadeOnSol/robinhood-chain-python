@@ -13,6 +13,8 @@ Live KOL trades and consensus clustering, token discovery, launch-bundle detecti
 
 Robinhood Chain coverage is bundled into **every** MadeOnSol tier at no extra cost — the same `msk_` API key and the same base URL. Free tier: 200 requests/day, no card (live feeds 5-min delayed; paid tiers are real-time). Get a key at [madeonsol.com/pricing](https://madeonsol.com/pricing).
 
+> **Server update 2026-10-04 (no package change needed): RHC copy-trade rules follow any valid source wallet.** `source_wallets` no longer have to be tracked KOL wallets (`/rhc/kol/wallets`): any valid `0x` wallet fires, KOL membership is optional enrichment, and copy-trade sources do not use Wallet Tracker quota. Each rule reports `source_admission` (`any_wallet`) and `operational_state` (`eligible`, or an infrastructure state `monitoring_pending` / `monitoring_unavailable` / `source_capacity_unavailable`). `source_wallets_tracked` / `source_wallets_untracked`, `no_tracked_sources` and the `untracked_source_wallets` warning are legacy, still filled. Existing rules work without editing. Limits are unchanged: PRO 3 rules × 5 wallets, ULTRA 20 × 50, BUSINESS 100 × 250.
+
 > **New in 0.17.0: token lock provenance.** `RhcTokenLock` TypedDict + docstring: Token lock rows carry `provider` (identity decided by the locker contract address: `verified` only for known provider deployments; `compatible` = ABI match, operator not identified, no id / website / `lock_url`), `explorer` (Blockscout links), `price_usd`, `seconds_until_end`, `seconds_until_next_unlock` (server 2026-10-02). RHC withdrawals stay untracked (`withdrawn` null); LP rows never get usd / price / %. `token_locks()` also takes `cursor` (`pagination["next_cursor"]`, strict keyset paging). Additive only.
 
 > **New in 0.18.0: Robinhood Chain holdings verified on-chain.** `wallet_positions()` rows are typed `VerifiedOpenPosition` (`current_onchain_balance`, `holding_status`) with `summary.holdings` (`HoldingsSummary`); `wallet()` gains `holdings`; copy-trade rules gain `operational_state`. Types and docs only.
@@ -223,10 +225,10 @@ from robinhood_chain import RobinhoodClient, NULL
 
 client = RobinhoodClient(api_key="msk_...")
 
-# Follow three TRACKED KOL wallets (the set behind /rhc/kol/wallets), 0.05 ETH
-# per copy, pushed over WebSocket. Any 0x address is accepted, but only tracked
-# wallets can ever fire: check sub["subscription"]["source_wallets_untracked"]
-# and sub.get("warnings") (code "untracked_source_wallets") — added 2026-09-22.
+# Follow three wallets (any valid 0x address, KOL or not, since 2026-10-04),
+# 0.05 ETH per copy, pushed over WebSocket. Check
+# sub["subscription"]["source_admission"] ("any_wallet") and
+# sub["subscription"]["operational_state"] ("eligible").
 sub = client.copytrade_subscriptions_create(
     name="degen desk",
     source_wallets=["0xaaa...", "0xbbb...", "0xccc..."],
@@ -712,3 +714,28 @@ Robinhood Chain is bundled into every tier at no extra cost. Get a key at [madeo
 
 MIT
 
+---
+
+## Agent Intelligence Gateway compatibility (coordinated release)
+
+**Scope:** Python Robinhood Chain client — Robinhood Chain.
+
+MadeOnSol's [Agent Intelligence Gateway](https://madeonsol.com/agent-gateway) is
+a separate six-action, read-only research layer: `discover_opportunities`,
+`evaluate_token`, `inspect_wallet`, `inspect_deployer`, `evaluate_signal`,
+and `changes_since`. These actions must not be inferred from a package's
+existing endpoint tools or release number. Follow only an actually published
+package manifest and the [six-tool reference](https://madeonsol.com/agent-gateway/docs).
+
+The SDK continues to expose its documented EVM-native RHC intelligence methods. Future Agent Gateway wrappers must validate 0x addresses, distinguish $40K peak-MC graduation from Solana bonding, and explicitly report that RHC historical Signal Scorecard parity is not verified. When using x402, choose the exact USDG-on-RHC or USDC-on-Solana offered leg; RHC data does not prove the settlement asset.
+
+**Access models:** a paid subscription authenticates a recurring API client;
+individual x402 calls are available only for exact live priced routes and
+accepted payment legs. MCP/Agent Kit/ElizaOS are tool integration layers, not
+independent billing plans. An account's usage limits and commercial
+redistribution entitlements still apply.
+
+The coordinated release is tracked in the [MadeOnSol source repository](https://github.com/MadeOnSol/madeonsol).
+Do not claim six-tool support from an unpublished local manifest or call a
+not-yet-deployed public Agent Gateway route. Client packages must be published
+and their registry versions synchronized before the site advertises support.

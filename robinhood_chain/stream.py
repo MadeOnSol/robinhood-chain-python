@@ -79,6 +79,11 @@ from urllib.parse import quote
 #                                 default True); score HIGHER = SAFER          (PRO+)
 #   rhc:wallet_scores           - rhc:deployer_tier_changed for filters.wallets
 #                                 (0x deployer addresses)                      (PRO+)
+#   rhc:dev_activity            - the token's recorded developer BUYING or
+#                                 SELLING it (types.RhcDevActivityEvent);
+#                                 developer token TRANSFERS are never on this
+#                                 channel; filters types, addresses, deployers,
+#                                 action; ring replay only                     (ULTRA+)
 CHANNELS = (
     "rhc:kol_trades",
     "rhc:dex_trades",
@@ -94,6 +99,8 @@ CHANNELS = (
     "rhc:token_candles",
     "rhc:token_risk",
     "rhc:wallet_scores",
+    "rhc:dev_activity",
+    "rhc:token_bundles",
 )
 
 # Deprecated spellings the server still accepts (acked under the canonical
@@ -123,6 +130,9 @@ EVENT_NAMES = (
     "rhc:risk_verdict_changed",   # on rhc:token_risk
     "rhc:risk_verdict",           # on rhc:token_risk — snapshot frame (snapshot=True)
     "rhc:deployer_tier_changed",  # on rhc:wallet_scores
+    "rhc:dev_activity",           # on rhc:dev_activity — dev_buy / dev_sell only (no transfers)
+    "rhc:token_bundle_cluster",   # on rhc:token_bundles — one new coordinated buy cluster
+    "rhc:token_bundle_exit",      # on rhc:token_bundles — that cluster sold 25/50/90/100 % of its cluster buy
 )
 
 # ── Shared stream core ─────────────────────────────────────────────────────
@@ -185,6 +195,9 @@ def _valid_cursor(c: Any) -> Optional[Dict[str, Any]]:
 # Fallback classification for servers that send no ``retryable`` flag: reasons
 # asking again can never fill. The server's own transient list is
 # backpressure | closed | source_busy | source_error | late_ingest_possible | row_cap.
+# Snapshot-then-update channels: a resume re-sends their state, so their
+# "state_stream" gap is never a history gap.
+STATE_STREAM_CHANNELS = frozenset({"token:prices", "rhc:token_prices"})
 PERMANENT_GAPS = frozenset({"not_reconstructable", "state_stream", "window_exceeded",
                             "ring_truncated", "instance_changed"})
 # The server's transient list - a channel with one of these is worth asking again.
@@ -862,8 +875,10 @@ class RobinhoodStream:
             chs = end.get("channels")
             if isinstance(chs, dict):
                 for ch, raw in chs.items():
-                    if ch == "token:prices":
-                        continue  # a state stream: the server re-sends a snapshot, never a log
+                    # Price channels are state streams: the server re-sends a snapshot, never a
+                    # log. Named subscriptions key them "<sub_id>/<channel>", so strip the prefix.
+                    if ch.rsplit("/", 1)[-1] in STATE_STREAM_CHANNELS:
+                        continue
                     info = raw if isinstance(raw, dict) else {}
                     gap = info.get("gap")
                     late = info.get("late_ingest_possible") is True
