@@ -577,8 +577,12 @@ class RhcDeployerTierChangedEvent(TypedDict, total=False):
     first_appearance: bool
     stats: Optional[Dict[str, Any]]  # tokens_deployed, graduated, graduation_rate, runners, runner_rate, best_peak_mc_usd, first_deploy_at, last_deploy_at
     computed_at: str
-    source: str  # "matview_refresh"
-    matview: str  # "mv_rhc_deployers"
+    source: str  # "matview_refresh" (v1 and v2: recomputed at T by a periodic refresh)
+    matview: str  # "mv_rhc_deployers" (where stats comes from)
+    # Deployer Hunter v2 events only (after the cutover); stats above is then DEPRECATED (v1 values):
+    rule_version: str  # "v2.0"
+    tier_source: str  # "rhc_deployer_reputation_v2"
+    stats_v2: Optional[Dict[str, Any]]  # tokens_deployed, resolved_launches, organic_runners, lifetime_rate, recent_rate, manipulation_status, first_deploy_at
 
 
 # ── /rhc/tokens ──
@@ -683,6 +687,41 @@ class EquitiesResponse(TypedDict, total=False):
 # ── /rhc/tokens/{address} ──
 
 
+class RhcDeployerReputationSummary(TypedDict, total=False):
+    """Deployer Hunter v2 (2026-10-19) reputation summary: tiers are earned on
+    organic durable runners over resolved launches, weighted to the last 10."""
+
+    tier: Optional[str]  # elite | good | neutral | spammer (Deployer Hunter v2)
+    rule_version: Optional[str]  # "v2.0" ("v1" only during an operator rollback)
+    resolved_launches: Optional[int]
+    organic_runners: Optional[int]
+    recent_rate: Optional[float]  # organic runner rate over the last 10 resolved launches
+    survival_1h_rate: Optional[float]
+    survival_sample: Optional[int]
+    manipulation_status: Optional[str]  # none | suspected | manipulated
+    confidence: Optional[str]  # high | medium | low
+
+
+class RhcTokenOutcome(TypedDict, total=False):
+    """Deployer Hunter v2 per-launch outcome; None until the token is scored."""
+
+    rule_version: Optional[str]
+    launched_at: Optional[str]
+    detected_at: Optional[str]
+    detected_mc_usd: Optional[float]  # the only base a since-detected multiple may use
+    detection_delay_s: Optional[int]  # contract creation -> detection
+    resolved: Optional[bool]
+    reached_100k: Optional[bool]
+    durable_runner: Optional[bool]
+    organic_runner: Optional[bool]
+    independent_traders: Optional[int]
+    survived_1h: Optional[bool]
+    risk_status: Optional[str]  # safe | unsafe | unknown
+    manipulation_flags: List[str]
+    manipulation_confidence: Optional[float]
+    confidence: Optional[str]
+
+
 class TokenDeployer(TypedDict, total=False):
     """Returned whenever the token row names its creator. Reputation fields are
     None while ``history_status`` is "pending" (not in the reputation view yet)
@@ -693,11 +732,19 @@ class TokenDeployer(TypedDict, total=False):
     address: str
     tier: Optional[str]
     tokens_deployed: Optional[int]
-    graduation_rate: Optional[float]
-    runner_rate: Optional[float]
-    runners: Optional[int]
-    best_peak_mc_usd: Optional[float]
-    launchpads: Optional[List[str]]
+    graduation_rate: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    runner_rate: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    runners: Optional[int]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    best_peak_mc_usd: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    launchpads: Optional[List[str]]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    rule_version: Optional[str]  # "v2.0" ("v1" only during an operator rollback)
+    resolved_launches: Optional[int]
+    organic_runners: Optional[int]
+    recent_rate: Optional[float]  # organic runner rate over the last 10 resolved launches
+    survival_1h_rate: Optional[float]
+    survival_sample: Optional[int]
+    manipulation_status: Optional[str]  # none | suspected | manipulated
+    confidence: Optional[str]  # high | medium | low
 
 
 class TokenKolParticipant(TypedDict, total=False):
@@ -1030,21 +1077,47 @@ class EarlyBuyersResponse(TypedDict, total=False):
 
 
 class DeployerRow(TypedDict, total=False):
+
     deployer_address: str
     tokens_deployed: int
-    graduated: int
-    graduation_rate: float
-    runners: int
-    runner_rate: float
-    best_peak_mc_usd: Optional[float]
-    launchpads: List[str]
-    first_deploy_at: Optional[str]
-    last_deploy_at: Optional[str]
+    graduated: int  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    graduation_rate: float  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    runners: int  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    runner_rate: float  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    best_peak_mc_usd: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    launchpads: List[str]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
     tier: str
+    rule_version: Optional[str]  # "v2.0" ("v1" only during an operator rollback)
+    resolved_launches: Optional[int]
+    organic_runners: Optional[int]
+    recent_rate: Optional[float]  # organic runner rate over the last 10 resolved launches
+    survival_1h_rate: Optional[float]
+    survival_sample: Optional[int]
+    manipulation_status: Optional[str]  # none | suspected | manipulated
+    confidence: Optional[str]  # high | medium | low
+    lifetime_rate: Optional[float]  # organic_runners / resolved_launches
+    recent_resolved: Optional[int]
+    recent_organic: Optional[int]
+    recent_results: Optional[List[Dict[str, Any]]]  # [{token, organic, peak_mc_usd, survived_1h}]
+    independent_traders_median: Optional[float]
+    manipulation_confidence: Optional[float]
+    unsafe_recent_share: Optional[float]
+    cohort_7777_share: Optional[float]
+    instant_bundled_share: Optional[float]
+    first_deploy_at: Optional[str]
+    last_deploy_at: Optional[str]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    history_days: Optional[float]
+    coverage: Optional[Dict[str, Any]]
+    computed_at: Optional[str]
+    tier_reasons: Optional[List[str]]  # v2 only (RHC_DEPLOYER_REPUTATION=v2): gate codes, empty for elite; absent in v1 responses
 
 
 class DeployerLeaderboardResponse(TypedDict, total=False):
     chain: str
+    rule_version: str
+    sort: str
+    sort_requested: str  # only when a pre-v2 sort name was mapped
+    sort_note: str
     deployers: List[DeployerRow]
     total: int
     limit: int
@@ -1059,15 +1132,37 @@ class DeployerProfileRow(TypedDict, total=False):
     deployer_address: str
     tokens_deployed: int
     curve_tokens: int
-    graduated: int
+    graduated: int  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
     bonding_rate: Optional[float]
-    runners: int
-    runner_rate: float
-    best_peak_mc_usd: Optional[float]
-    launchpads: List[str]
+    runners: int  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    runner_rate: float  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    best_peak_mc_usd: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    launchpads: List[str]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
     first_deploy_at: Optional[str]
-    last_deploy_at: Optional[str]
+    last_deploy_at: Optional[str]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
     tier: str
+    # Deployer Hunter v2 only (RHC_DEPLOYER_REPUTATION=v2); absent in the default v1 response.
+    rule_version: Optional[str]  # "v2.0" ("v1" only during an operator rollback)
+    resolved_launches: Optional[int]
+    organic_runners: Optional[int]
+    recent_rate: Optional[float]  # organic runner rate over the last 10 resolved launches
+    survival_1h_rate: Optional[float]
+    survival_sample: Optional[int]
+    manipulation_status: Optional[str]  # none | suspected | manipulated
+    confidence: Optional[str]  # high | medium | low
+    lifetime_rate: Optional[float]  # organic_runners / resolved_launches
+    recent_resolved: Optional[int]
+    recent_organic: Optional[int]
+    recent_results: Optional[List[Dict[str, Any]]]  # [{token, organic, peak_mc_usd, survived_1h}]
+    independent_traders_median: Optional[float]
+    manipulation_confidence: Optional[float]
+    unsafe_recent_share: Optional[float]
+    cohort_7777_share: Optional[float]
+    instant_bundled_share: Optional[float]
+    history_days: Optional[float]
+    coverage: Optional[Dict[str, Any]]
+    computed_at: Optional[str]
+    tier_reasons: Optional[List[str]]  # v2 only (RHC_DEPLOYER_REPUTATION=v2): gate codes, empty for elite; absent in v1 responses
 
 
 class DeployerRecentToken(TypedDict, total=False):
@@ -1082,6 +1177,18 @@ class DeployerRecentToken(TypedDict, total=False):
     market_cap_usd: Optional[float]
     peak_mc_usd: Optional[float]
     peak_mc_at: Optional[str]
+    outcome: Optional[RhcTokenOutcome]
+
+
+class RhcDeployerActivity(TypedDict, total=False):
+    """Deployer Hunter v2 only (rhc/049). Never changes the tier."""
+    state: str  # "active" | "dormant" | "no_launches"
+    last_launch_at: Optional[str]  # None only when state == "no_launches"
+    days_since_last_launch: Optional[float]
+    launches_7d: int
+    launches_30d: int
+    window_days: int  # 7
+    as_of: Optional[str]
 
 
 class DeployerProfileResponse(TypedDict, total=False):
@@ -1091,6 +1198,8 @@ class DeployerProfileResponse(TypedDict, total=False):
     deployer: Optional[DeployerProfileRow]
     recent_tokens: List[DeployerRecentToken]
     recent_tokens_count: int
+    # v2 only. None = NOT MEASURED (unavailable or not enabled); never means dormant.
+    activity: Optional[RhcDeployerActivity]
 
 
 # ── /rhc/deployer-hunter/{address}/trajectory ──
@@ -1131,6 +1240,7 @@ class DeployerTrajectoryResponse(TypedDict, total=False):
     address: str
     deployer: Optional[DeployerRow]
     success_metric: str
+    rule_version: str
     trajectory: Optional[DeployerTrajectory]
     truncated: bool
 
@@ -1151,6 +1261,7 @@ class DeployerTokenRow(TypedDict, total=False):
     peak_mc_usd: Optional[float]
     peak_mc_at: Optional[str]
     liquidity_usd: Optional[float]
+    outcome: Optional[RhcTokenOutcome]
 
 
 class DeployerTokensResponse(TypedDict, total=False):
@@ -1190,9 +1301,17 @@ class DeployerLaunches24h(TypedDict, total=False):
 class BestTokenDeployer(TypedDict, total=False):
     address: str
     tier: str
-    graduation_rate: Optional[float]
-    runner_rate: Optional[float]
+    graduation_rate: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    runner_rate: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
     tokens_deployed: int
+    rule_version: Optional[str]  # "v2.0" ("v1" only during an operator rollback)
+    resolved_launches: Optional[int]
+    organic_runners: Optional[int]
+    recent_rate: Optional[float]  # organic runner rate over the last 10 resolved launches
+    survival_1h_rate: Optional[float]
+    survival_sample: Optional[int]
+    manipulation_status: Optional[str]  # none | suspected | manipulated
+    confidence: Optional[str]  # high | medium | low
 
 
 class BestToken(TypedDict, total=False):
@@ -1206,6 +1325,7 @@ class BestToken(TypedDict, total=False):
     peak_mc_usd: Optional[float]
     peak_mc_at: Optional[str]
     liquidity_usd: Optional[float]
+    outcome: Optional[RhcTokenOutcome]
     deployer: Optional[BestTokenDeployer]
 
 
@@ -1236,9 +1356,11 @@ class DeployerStatsResponse(TypedDict, total=False):
     spam_token_share: Optional[float]
     alerts_24h: int
     alerts_7d: int
+    rule_version: str
     tier_rules: dict
     graduation_definition: str
     runner_definition: str
+    organic_runner_definition: str
 
 
 # ── /rhc/deployer-hunter/alerts ──
@@ -1255,6 +1377,8 @@ class DeployerAlert(TypedDict, total=False):
     message: Optional[str]
     launchpad: Optional[str]
     tier: Optional[str]  # CURRENT tier, resolved at read time
+    deployer_reputation: Optional[RhcDeployerReputationSummary]
+    token_outcome: Optional[RhcTokenOutcome]
     tier_at_alert: Optional[str]  # snapshot written when the alert fired
     tier_is_stale: bool
     mc_at_alert: Optional[float]
@@ -1298,6 +1422,7 @@ class DeployerHistoryToken(TypedDict, total=False):
     market_cap_usd: Optional[float]
     peak_mc_usd: Optional[float]
     peak_mc_at: Optional[str]
+    outcome: Optional[RhcTokenOutcome]
 
 
 class DeployerHistoryResponse(TypedDict, total=False):
@@ -1811,7 +1936,9 @@ class WalletFlags(TypedDict, total=False):
     is_deployer: bool
     deployer_tier: Optional[str]
     deployer_tokens: Optional[int]
-    deployer_runner_rate: Optional[float]
+    deployer_runner_rate: Optional[float]  # DEPRECATED: Deployer Hunter v1 metric, kept with its v1 value after the v2 cutover; not a v2 tier input
+    deployer_organic_runner_rate: Optional[float]  # v2: organic runners / resolved launches
+    deployer_resolved_launches: Optional[int]
     is_alpha_tracked: bool
     alpha_win_rate: Optional[float]
     alpha_net_eth: Optional[float]
